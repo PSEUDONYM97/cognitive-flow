@@ -179,11 +179,17 @@ class SettingsDialog(QDialog):
             stats_grid = QVBoxLayout()
             stats_grid.setSpacing(16)  # More space between stat rows
             
+            # Enhanced stats display
+            avg_speed = self.app_ref.stats.get_avg_speed_ratio()
+            avg_words = self.app_ref.stats.get_avg_words_per_recording()
+            
             stats_items = [
                 ("Total Recordings", f"{stats.get('total_records', 0):,}"),
                 ("Words Transcribed", f"{stats.get('total_words', 0):,}"),
+                ("Avg Words/Recording", f"{avg_words:.1f}"),
                 ("Time Saved", self.app_ref.stats.get_time_saved()),
                 ("Total Audio", f"{stats.get('total_seconds', 0) / 60:.1f} minutes"),
+                ("Avg Speed Ratio", f"{avg_speed:.2f}x" if avg_speed > 0 else "N/A"),
             ]
             
             for label, value in stats_items:
