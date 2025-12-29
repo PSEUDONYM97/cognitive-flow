@@ -16,6 +16,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Import our logger
+from logger import logger
+
 # Add CUDA libraries to PATH for GPU support (MUST be before importing faster_whisper)
 try:
     import site
@@ -181,14 +184,22 @@ class Statistics:
             self._save(stats)
             return stats
         
-        # Fresh start
+        # Fresh start with enhanced metrics
         return {
             "total_seconds": 0,
             "total_records": 0,
             "total_words": 0,
             "total_characters": 0,
             "last_used": "",
-            "imported_from_whispertyping": False
+            "imported_from_whispertyping": False,
+            "total_processing_time": 0,  # Total time spent processing
+            "session_stats": {
+                "records": 0,
+                "words": 0,
+                "characters": 0,
+                "processing_time": 0
+            },
+            "performance_history": []  # Last 100 transcriptions
         }
     
     def _save(self, stats: dict | None = None):
@@ -197,13 +208,43 @@ class Statistics:
         with open(self.stats_file, 'w') as f:
             json.dump(stats, f, indent=2)
     
-    def record(self, duration_seconds: float, text: str):
-        """Record a transcription"""
+    def record(self, duration_seconds: float, text: str, processing_time: float = 0):
+        """Record a transcription with enhanced metrics"""
+        words = len(text.split())
+        chars = len(text)
+        
+        # Update totals
         self.stats["total_seconds"] += duration_seconds
         self.stats["total_records"] += 1
-        self.stats["total_words"] += len(text.split())
-        self.stats["total_characters"] += len(text)
+        self.stats["total_words"] += words
+        self.stats["total_characters"] += chars
+        self.stats["total_processing_time"] = self.stats.get("total_processing_time", 0) + processing_time
         self.stats["last_used"] = datetime.now().isoformat()
+        
+        # Update session stats
+        if "session_stats" not in self.stats:
+            self.stats["session_stats"] = {"records": 0, "words": 0, "characters": 0, "processing_time": 0}
+        
+        self.stats["session_stats"]["records"] += 1
+        self.stats["session_stats"]["words"] += words
+        self.stats["session_stats"]["characters"] += chars
+        self.stats["session_stats"]["processing_time"] += processing_time
+        
+        # Track performance history (last 100)
+        if "performance_history" not in self.stats:
+            self.stats["performance_history"] = []
+        
+        perf_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "audio_duration": duration_seconds,
+            "processing_time": processing_time,
+            "words": words,
+            "speed_ratio": processing_time / duration_seconds if duration_seconds > 0 else 0
+        }
+        
+        self.stats["performance_history"].insert(0, perf_entry)
+        self.stats["performance_history"] = self.stats["performance_history"][:100]
+        
         self._save()
     
     def get_time_saved(self) -> str:
@@ -227,6 +268,31 @@ class Statistics:
             f"Words: {self.stats['total_words']:,} | "
             f"Time saved: ~{self.get_time_saved()}"
         )
+    
+    def get_avg_speed_ratio(self) -> float:
+        """Get average processing speed ratio"""
+        history = self.stats.get("performance_history", [])
+        if not history:
+            return 0
+        ratios = [h["speed_ratio"] for h in history if h.get("speed_ratio", 0) > 0]
+        return sum(ratios) / len(ratios) if ratios else 0
+    
+    def get_avg_words_per_recording(self) -> float:
+        """Get average words per recording"""
+        records = self.stats.get("total_records", 0)
+        if records == 0:
+            return 0
+        return self.stats.get("total_words", 0) / records
+    
+    def reset_session_stats(self):
+        """Reset session statistics"""
+        self.stats["session_stats"] = {
+            "records": 0,
+            "words": 0,
+            "characters": 0,
+            "processing_time": 0
+        }
+        self._save()
 
 
 class TextProcessor:
@@ -506,20 +572,18 @@ class WhisperTypingApp:
         # For clean shutdown
         self.running = True
         
-        print("=" * 50)
-        print("  Cognitive Flow - Local Voice-to-Text")
-        print("=" * 50)
-        print(f"\n{self.stats.summary()}\n")
-        print("Controls:")
-        print("  ~ (tilde)     - Start/stop recording")
-        print("  Tray > Quit   - Exit application")
-        print("  Right-click   - Open settings")
-        print()
+        logger.header("Cognitive Flow - Local Voice-to-Text")
+        logger.info("Stats", self.stats.summary())
+        logger.separator()
+        logger.info("Controls", "~ (tilde) - Start/stop recording")
+        logger.info("Controls", "Tray > Quit - Exit application")
+        logger.info("Controls", "Right-click - Open settings")
+        logger.separator()
         
         # Load config (model preference)
         self.config_file = Path(__file__).parent / "config.json"
         self.model_name = self._load_config()
-        print(f"Loading Whisper model ({self.model_name})...")
+        logger.info("Model", f"Loading Whisper model ({self.model_name})...")
     
     def _load_config(self) -> str:
         """Load configuration from file"""
@@ -647,11 +711,11 @@ class WhisperTypingApp:
     def toggle_recording(self):
         """Toggle recording state"""
         if self.model_loading:
-            print("[Wait] Model still loading...")
+            logger.warning("Record", "Model still loading...")
             return
         
         if not self.model:
-            print("[Error] Model not loaded")
+            logger.error("Record", "Model not loaded")
             SoundEffects.play_error()
             return
         
@@ -667,7 +731,7 @@ class WhisperTypingApp:
         self.record_start_time = time.time()
         
         SoundEffects.play_start()
-        print("[Recording] Listening...")
+        logger.info("Record", "Listening...")
         
         if self.tray:
             self.tray.update_icon(recording=True)
@@ -702,7 +766,7 @@ class WhisperTypingApp:
         duration = time.time() - self.record_start_time
         
         SoundEffects.play_stop()
-        print(f"[Processing] {duration:.1f}s of audio...")
+        logger.info("Processing", f"{duration:.1f}s of audio...")
         
         if self.tray:
             self.tray.update_icon(recording=False)
@@ -765,22 +829,28 @@ class WhisperTypingApp:
                 os.unlink(temp_path)
                 
                 if processed_text:
-                    # Update stats
-                    self.stats.record(duration, processed_text)
+                    total_pipeline = timer.time() - start_time
+                    
+                    # Update stats with processing time
+                    self.stats.record(duration, processed_text, total_pipeline)
                     
                     # Add to UI history
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration)
                     
                     # Type into focused app
-                    print(f"[Typing] {len(processed_text)} chars: {processed_text[:50]}{'...' if len(processed_text) > 50 else ''}")
+                    logger.info("Typing", f"{len(processed_text)} chars: {processed_text[:50]}{'...' if len(processed_text) > 50 else ''}")
                     typing_start = timer.time()
                     VirtualKeyboard.type_text(processed_text)
                     typing_time = timer.time() - typing_start
                     
-                    print(f"[Debug] Typing took: {typing_time:.2f}s ({len(processed_text)/typing_time:.0f} chars/sec)")
-                    print(f"[Debug] TOTAL PIPELINE: {timer.time() - start_time:.2f}s")
-                    print(f"[Done] {self.stats.summary()}")
+                    # Performance metrics
+                    words = len(processed_text.split())
+                    speed_ratio = total_pipeline / duration if duration > 0 else 0
+                    
+                    logger.debug("Perf", f"Typing: {typing_time:.2f}s ({len(processed_text)/typing_time:.0f} chars/sec)")
+                    logger.success("Pipeline", f"{total_pipeline:.2f}s total | {speed_ratio:.2f}x realtime | {words} words")
+                    logger.info("Stats", self.stats.summary())
                     
                     # Show success briefly
                     if self.ui:
