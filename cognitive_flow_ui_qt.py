@@ -179,20 +179,50 @@ class SettingsDialog(QDialog):
             stats_grid = QVBoxLayout()
             stats_grid.setSpacing(16)  # More space between stat rows
             
-            # Enhanced stats display
+            # Personalized stats based on YOUR typing speed (30 WPM, 92% accuracy)
             avg_speed = self.app_ref.stats.get_avg_speed_ratio()
             avg_words = self.app_ref.stats.get_avg_words_per_recording()
+            speaking_wpm = self.app_ref.stats.get_speaking_speed_wpm()
+            seconds_per_word = self.app_ref.stats.get_seconds_per_word()
+            comparison = self.app_ref.stats.get_typing_vs_speaking_comparison()
             
             stats_items = [
+                # Core stats
                 ("Total Recordings", f"{stats.get('total_records', 0):,}"),
                 ("Words Transcribed", f"{stats.get('total_words', 0):,}"),
-                ("Avg Words/Recording", f"{avg_words:.1f}"),
+                ("Total Audio Time", f"{stats.get('total_seconds', 0) / 60:.1f} min"),
+                
+                # Separator
+                ("", ""),
+                
+                # Speed comparison
+                ("Your Speaking Speed", f"{speaking_wpm:.0f} WPM"),
+                ("Your Typing Speed", "30 WPM"),
+                ("Seconds per Word", f"{seconds_per_word:.2f}s"),
+                
+                # Separator  
+                ("", ""),
+                
+                # Time analysis
+                ("Time Typing Would Take", f"{comparison['typing_time']:.0f} min"),
+                ("Time Speaking Took", f"{comparison['speaking_time']:.0f} min"),
                 ("Time Saved", self.app_ref.stats.get_time_saved()),
-                ("Total Audio", f"{stats.get('total_seconds', 0) / 60:.1f} minutes"),
-                ("Avg Speed Ratio", f"{avg_speed:.2f}x" if avg_speed > 0 else "N/A"),
+                ("Efficiency Gain", f"{comparison['efficiency_ratio']:.1f}x faster"),
+                
+                # Separator
+                ("", ""),
+                
+                # Performance
+                ("Avg Words/Recording", f"{avg_words:.1f}"),
+                ("Avg Processing Speed", f"{avg_speed:.2f}x" if avg_speed > 0 else "N/A"),
             ]
             
             for label, value in stats_items:
+                # Skip empty separators visually but add spacing
+                if label == "":
+                    stats_grid.addSpacing(12)
+                    continue
+                    
                 item_layout = QHBoxLayout()
                 item_layout.setSpacing(8)
                 

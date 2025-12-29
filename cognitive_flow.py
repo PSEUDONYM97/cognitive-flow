@@ -248,18 +248,57 @@ class Statistics:
         self._save()
     
     def get_time_saved(self) -> str:
-        """Estimate time saved (assuming 40 WPM typing vs speaking)"""
+        """Calculate time saved using YOUR actual typing speed (30 WPM)"""
         words = self.stats["total_words"]
-        # Average typing: 40 WPM, Average speaking: 150 WPM
-        typing_time = words / 40  # minutes
-        speaking_time = words / 150  # minutes
-        saved_minutes = typing_time - speaking_time
+        audio_seconds = self.stats["total_seconds"]
+        
+        # Your actual typing speed: 30 WPM (from test)
+        typing_time_minutes = words / 30
+        
+        # Actual speaking time (from recorded audio)
+        speaking_time_minutes = audio_seconds / 60
+        
+        # Time saved = what typing would have taken - what speaking took
+        saved_minutes = typing_time_minutes - speaking_time_minutes
         
         if saved_minutes < 60:
             return f"{saved_minutes:.0f} minutes"
         else:
             hours = saved_minutes / 60
             return f"{hours:.1f} hours"
+    
+    def get_typing_vs_speaking_comparison(self) -> dict:
+        """Get detailed comparison of typing time vs speaking time"""
+        words = self.stats["total_words"]
+        audio_seconds = self.stats["total_seconds"]
+        
+        typing_time_minutes = words / 30  # Your 30 WPM
+        speaking_time_minutes = audio_seconds / 60
+        
+        return {
+            "typing_time": typing_time_minutes,
+            "speaking_time": speaking_time_minutes,
+            "time_saved": typing_time_minutes - speaking_time_minutes,
+            "efficiency_ratio": typing_time_minutes / speaking_time_minutes if speaking_time_minutes > 0 else 0
+        }
+    
+    def get_speaking_speed_wpm(self) -> float:
+        """Calculate your average speaking speed in words per minute"""
+        words = self.stats["total_words"]
+        audio_seconds = self.stats["total_seconds"]
+        
+        if audio_seconds == 0:
+            return 0
+        
+        minutes = audio_seconds / 60
+        return words / minutes if minutes > 0 else 0
+    
+    def get_seconds_per_word(self) -> float:
+        """Calculate average seconds per word when speaking"""
+        words = self.stats["total_words"]
+        audio_seconds = self.stats["total_seconds"]
+        
+        return audio_seconds / words if words > 0 else 0
     
     def summary(self) -> str:
         """Get a summary string"""
