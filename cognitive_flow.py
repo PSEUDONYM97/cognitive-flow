@@ -54,13 +54,21 @@ except ImportError:
     HAS_TRAY = False
     print("[Note] Install pystray and pillow for system tray: pip install pystray pillow")
 
-# UI module
+# UI module - try PyQt first, fallback to tkinter
+HAS_UI = False
+CognitiveFlowUI = None
+
 try:
-    from cognitive_flow_ui import CognitiveFlowUI
+    from cognitive_flow_ui_qt import CognitiveFlowUI
     HAS_UI = True
+    print("[UI] Using PyQt6 (smooth graphics)")
 except ImportError:
-    HAS_UI = False
-    print("[Note] UI module not found, running in console mode")
+    try:
+        from cognitive_flow_ui import CognitiveFlowUI
+        HAS_UI = True
+        print("[UI] Using tkinter (basic graphics)")
+    except ImportError:
+        print("[Note] No UI module found, running in console mode")
 
 # Windows API constants
 WH_KEYBOARD_LL = 13
@@ -341,40 +349,67 @@ class SystemTray:
     
     def on_quit(self, icon, item):
         """Handle quit from tray menu"""
-        print("\n[Exit] Quit from system tray")
+        import sys
+        import os
+        import threading
+        
+        print("\n[Exit] Quit from system tray - starting cleanup...")
         self.app.running = False
         
-        # Stop everything
-        icon.stop()
+        # Stop icon first (this is blocking the exit)
+        print("[Exit] Stopping tray icon...")
+        try:
+            icon.visible = False
+            icon.stop()
+        except Exception as e:
+            print(f"[Exit] Tray icon error: {e}")
         
         # Unhook keyboard
-        if self.app.hook:
-            UnhookWindowsHookEx(self.app.hook)
+        print("[Exit] Removing keyboard hook...")
+        try:
+            if self.app.hook:
+                UnhookWindowsHookEx(self.app.hook)
+                self.app.hook = None
+        except Exception as e:
+            print(f"[Exit] Hook error: {e}")
+        
+        # Close Qt UI - SKIP GRACEFUL SHUTDOWN, just force exit
+        print("[Exit] Closing Qt UI...")
+        # Don't even try to clean up Qt - it hangs
+        # Just let os._exit() kill everything
         
         # Terminate audio
-        if self.app.audio:
-            self.app.audio.terminate()
+        print("[Exit] Terminating audio...")
+        try:
+            if self.app.audio:
+                self.app.audio.terminate()
+        except Exception as e:
+            print(f"[Exit] Audio error: {e}")
         
-        # Stop UI
-        if self.app.ui:
-            self.app.ui.destroy()
+        # Post quit to Windows message loop
+        print("[Exit] Posting quit message...")
+        try:
+            ctypes.windll.user32.PostQuitMessage(0)
+        except Exception as e:
+            print(f"[Exit] PostQuit error: {e}")
         
-        # Post quit message to message loop
-        ctypes.windll.user32.PostQuitMessage(0)
-        
-        # Force exit if still running after 1 second
-        import sys
-        threading.Timer(1.0, lambda: sys.exit(0)).start()
+        # Force exit NOW - no waiting
+        print("[Exit] Goodbye!")
+        os._exit(0)  # Nuclear option - immediate exit
     
     def on_show_stats(self, icon, item):
-        """Show stats in a message box"""
-        stats = self.app.stats.summary()
-        ctypes.windll.user32.MessageBoxW(
-            None, 
-            stats, 
-            "Cognitive Flow Stats", 
-            0x40  # MB_ICONINFORMATION
-        )
+        """Show settings dialog (not old MessageBox)"""
+        if self.app.ui:
+            self.app.ui.show_settings()
+        else:
+            # Fallback to old message box if no UI
+            stats = self.app.stats.summary()
+            ctypes.windll.user32.MessageBoxW(
+                None, 
+                stats, 
+                "Cognitive Flow Stats", 
+                0x40  # MB_ICONINFORMATION
+            )
     
     def run(self):
         """Run the system tray icon"""
@@ -477,13 +512,32 @@ class WhisperTypingApp:
         print(f"\n{self.stats.summary()}\n")
         print("Controls:")
         print("  ~ (tilde)     - Start/stop recording")
-        print("  Tray → Quit   - Exit application")
+        print("  Tray > Quit   - Exit application")
         print("  Right-click   - Open settings")
         print()
         
-        # Default to medium for speed, can override in settings
-        self.model_name = "medium"
+        # Load config (model preference)
+        self.config_file = Path(__file__).parent / "config.json"
+        self.model_name = self._load_config()
         print(f"Loading Whisper model ({self.model_name})...")
+    
+    def _load_config(self) -> str:
+        """Load configuration from file"""
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    return config.get('model_name', 'medium')
+            except:
+                pass
+        return 'medium'
+    
+    def save_config(self):
+        """Save configuration to file"""
+        config = {'model_name': self.model_name}
+        with open(self.config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"[Config] Saved model preference: {self.model_name}")
     
     def load_model(self):
         """Load Whisper model in background"""
@@ -564,10 +618,31 @@ class WhisperTypingApp:
         print("[Hook] Global keyboard hook installed")
     
     def message_loop(self):
-        """Windows message loop - required for hooks to work"""
+        """
+        Hybrid Windows + Qt message loop
+        Process Windows messages (for keyboard hook) AND Qt events (for UI)
+        """
         msg = ctypes.wintypes.MSG()
-        while self.running and GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            pass
+        PeekMessageW = user32.PeekMessageW
+        TranslateMessage = user32.TranslateMessage
+        DispatchMessageW = user32.DispatchMessageW
+        PM_REMOVE = 0x0001
+        
+        while self.running:
+            # Process Qt events (non-blocking)
+            if self.ui and self.ui.qt_app:
+                self.ui.qt_app.processEvents()
+            
+            # Check for Windows messages (non-blocking peek)
+            if PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+                if msg.message == 0x0012:  # WM_QUIT
+                    break
+                TranslateMessage(ctypes.byref(msg))
+                DispatchMessageW(ctypes.byref(msg))
+            else:
+                # No messages - sleep briefly to avoid CPU spin
+                import time
+                time.sleep(0.001)  # 1ms sleep
     
     def toggle_recording(self):
         """Toggle recording state"""
