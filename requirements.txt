@@ -1,0 +1,21 @@
+# Cognitive Flow - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core transcription
+faster-whisper>=1.0.0
+
+# Audio recording
+PyAudio>=0.2.14
+
+# UI
+PyQt6>=6.5.0
+pystray>=0.19.0
+pillow>=10.0.0
+
+# Utilities
+numpy>=1.24.0
+
+# GPU Support (optional but recommended for speed)
+# These provide CUDA libraries for GPU acceleration
+nvidia-cudnn-cu12>=9.0.0
+nvidia-cublas-cu12>=12.0.0
