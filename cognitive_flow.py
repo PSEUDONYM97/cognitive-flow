@@ -19,31 +19,44 @@ from pathlib import Path
 # Import our logger
 from logger import logger
 
-# Add CUDA libraries to PATH for GPU support (MUST be before importing faster_whisper)
+# Add CUDA libraries for GPU support (MUST be before importing faster_whisper)
+# Pre-load ALL DLLs explicitly - os.add_dll_directory alone doesn't work reliably
+GPU_AVAILABLE = False
 try:
     import site
     user_site = site.USER_SITE
     if user_site:
         cuda_path = Path(user_site) / "nvidia"
         if cuda_path.exists():
-            # Add to both DLL search path AND system PATH
-            cudnn_bin = str(cuda_path / "cudnn" / "bin")
-            cublas_bin = str(cuda_path / "cublas" / "bin")
+            cudnn_bin = cuda_path / "cudnn" / "bin"
+            cublas_bin = cuda_path / "cublas" / "bin"
             
-            # Method 1: Add to DLL directory (Windows 10+)
-            if Path(cudnn_bin).exists():
-                os.add_dll_directory(cudnn_bin)
-            if Path(cublas_bin).exists():
-                os.add_dll_directory(cublas_bin)
+            # Add to DLL search paths
+            if cudnn_bin.exists():
+                os.add_dll_directory(str(cudnn_bin))
+            if cublas_bin.exists():
+                os.add_dll_directory(str(cublas_bin))
             
-            # Method 2: Add to PATH environment variable (works everywhere)
-            current_path = os.environ.get('PATH', '')
-            os.environ['PATH'] = f"{cudnn_bin};{cublas_bin};{current_path}"
+            # Add to PATH
+            os.environ['PATH'] = f"{cudnn_bin};{cublas_bin};" + os.environ.get('PATH', '')
             
-            print(f"[CUDA] Added cuDNN to PATH: {cudnn_bin}")
+            # Pre-load ALL DLLs explicitly (critical for ctranslate2 to find them)
+            dll_count = 0
+            for dll_dir in [cublas_bin, cudnn_bin]:
+                if dll_dir.exists():
+                    for dll in dll_dir.glob("*.dll"):
+                        try:
+                            ctypes.CDLL(str(dll))
+                            dll_count += 1
+                        except Exception:
+                            pass  # Some DLLs have dependencies, skip failures
+            
+            if dll_count > 0:
+                GPU_AVAILABLE = True
+                print(f"[CUDA] Loaded {dll_count} GPU libraries")
 except Exception as e:
-    print(f"[CUDA] Setup warning: {e}")
-    pass  # Fallback to CPU if CUDA setup fails
+    print(f"[CUDA] GPU setup failed: {e} - using CPU")
+    GPU_AVAILABLE = False
 
 import pyaudio
 from faster_whisper import WhisperModel
@@ -593,6 +606,7 @@ class WhisperTypingApp:
         self.processor = TextProcessor()
         self.model: WhisperModel | None = None
         self.model_loading = False
+        self.using_gpu = False
         
         # System tray
         self.tray: SystemTray | None = None
@@ -643,14 +657,37 @@ class WhisperTypingApp:
         print(f"[Config] Saved model preference: {self.model_name}")
     
     def load_model(self):
-        """Load Whisper model in background"""
+        """Load Whisper model in background - GPU if available, CPU fallback"""
         self.model_loading = True
         
         def _load():
             try:
-                # Use CPU - GPU has inference issues (outputs garbage and hangs)
-                # TODO: Debug GPU separately - needs proper CUDA/cuDNN setup
-                print("[CPU] Loading model on CPU (optimized)...")
+                # Try GPU first if available
+                if GPU_AVAILABLE:
+                    print(f"[GPU] Loading {self.model_name} model on CUDA...")
+                    try:
+                        self.model = WhisperModel(
+                            self.model_name,
+                            device="cuda",
+                            compute_type="float32",  # Most compatible, still fast
+                            device_index=0
+                        )
+                        self.using_gpu = True
+                        print(f"[GPU] Model loaded successfully!")
+                        print(f"[Ready] Model: {self.model_name} (GPU) | Press ~ to record")
+                        print(f"[Stats] {self.stats.summary()}")
+                        if self.tray:
+                            self.tray.update_icon(recording=False, loading=False)
+                            self.tray.icon.title = "Cognitive Flow - Ready (GPU)"
+                        if self.ui:
+                            self.ui.set_state("idle", "Ready (GPU) - Press ~ to record")
+                        return
+                    except Exception as gpu_err:
+                        print(f"[GPU] Failed: {gpu_err}")
+                        print("[GPU] Falling back to CPU...")
+                
+                # CPU fallback
+                print(f"[CPU] Loading {self.model_name} model on CPU...")
                 self.model = WhisperModel(
                     self.model_name,
                     device="cpu",
@@ -658,21 +695,24 @@ class WhisperTypingApp:
                     cpu_threads=4,
                     num_workers=1
                 )
-                print("[CPU] ✓ Model loaded successfully!")
-                print(f"[Ready] Model: {self.model_name} | Press tilde (~) to start/stop recording")
+                self.using_gpu = False
+                print("[CPU] Model loaded successfully!")
+                print(f"[Ready] Model: {self.model_name} (CPU) | Press ~ to record")
                 print(f"[Stats] {self.stats.summary()}")
                 if self.tray:
                     self.tray.update_icon(recording=False, loading=False)
-                    self.tray.icon.title = "Cognitive Flow - Ready"  # type: ignore
+                    self.tray.icon.title = "Cognitive Flow - Ready (CPU)"
                 if self.ui:
-                    self.ui.set_state("idle", "Ready - Press ~ to record")
+                    self.ui.set_state("idle", "Ready (CPU) - Press ~ to record")
+                    
             except Exception as e:
                 print(f"[Error] Failed to load {self.model_name}: {e}")
-                print("[Fallback] Trying 'base' model...")
+                print("[Fallback] Trying 'base' model on CPU...")
                 try:
                     self.model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=4)
                     self.model_name = "base"
-                    print("[Ready] Using base model. Press tilde (~) to start/stop")
+                    self.using_gpu = False
+                    print("[Ready] Using base model (CPU). Press ~ to record")
                 except Exception as e2:
                     print(f"[Fatal] Could not load any model: {e2}")
             finally:
