@@ -884,7 +884,10 @@ class WhisperTypingApp:
                     language="en",      # Skip language detection
                     vad_filter=False,   # Disable VAD for speed (we record clean audio)
                     word_timestamps=False,  # Don't need word-level timing
-                    condition_on_previous_text=False  # Faster, each segment independent
+                    condition_on_previous_text=True,  # Keep context across pauses
+                    no_speech_threshold=0.9,  # Higher threshold - don't cut on pauses
+                    hallucination_silence_threshold=None,  # Don't cut on silence
+                    log_prob_threshold=-1.0,  # Default, but explicit
                 )
                 
                 transcribe_time = timer.time() - transcribe_start
