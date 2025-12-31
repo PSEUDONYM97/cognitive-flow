@@ -555,11 +555,36 @@ class VirtualKeyboard:
     
     @staticmethod
     def type_text(text: str):
-        """Type text character by character using SendInput - FAST"""
-        # Batch characters for speed (no delay between chars)
-        for char in text:
-            VirtualKeyboard._send_unicode_char(char)
-            # NO SLEEP - let it rip at full speed
+        """Type text using batched SendInput - MAXIMUM SPEED"""
+        # Batch all characters into a single SendInput call for max speed
+        num_chars = len(text)
+        if num_chars == 0:
+            return
+        
+        # Each char needs 2 inputs (down + up)
+        inputs = (INPUT * (num_chars * 2))()
+        
+        for i, char in enumerate(text):
+            idx = i * 2
+            
+            # Key down
+            inputs[idx].type = INPUT_KEYBOARD
+            inputs[idx].union.ki.wVk = 0
+            inputs[idx].union.ki.wScan = ord(char)
+            inputs[idx].union.ki.dwFlags = KEYEVENTF_UNICODE
+            inputs[idx].union.ki.time = 0
+            inputs[idx].union.ki.dwExtraInfo = None
+            
+            # Key up
+            inputs[idx + 1].type = INPUT_KEYBOARD
+            inputs[idx + 1].union.ki.wVk = 0
+            inputs[idx + 1].union.ki.wScan = ord(char)
+            inputs[idx + 1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+            inputs[idx + 1].union.ki.time = 0
+            inputs[idx + 1].union.ki.dwExtraInfo = None
+        
+        # Send all inputs in one call - MUCH faster
+        SendInput(num_chars * 2, inputs, ctypes.sizeof(INPUT))
     
     @staticmethod
     def _send_unicode_char(char: str):
@@ -875,20 +900,12 @@ class WhisperTypingApp:
         def _transcribe():
             try:
                 import time as timer
+                import numpy as np
                 start_time = timer.time()
                 
-                # Save to temp file
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    temp_path = f.name
-                
-                wf = wave.open(temp_path, 'wb')
-                wf.setnchannels(self.CHANNELS)
-                wf.setsampwidth(self.audio.get_sample_size(self.FORMAT))
-                wf.setframerate(self.RATE)
-                wf.writeframes(b''.join(self.frames))
-                wf.close()
-                
-                print(f"[Debug] Audio saved: {temp_path} ({os.path.getsize(temp_path)} bytes)")
+                # Convert audio frames to numpy array - NO FILE I/O
+                audio_data = b''.join(self.frames)
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 
                 # Transcribe with optimizations
                 if self.model is None:
@@ -898,7 +915,7 @@ class WhisperTypingApp:
                 print(f"[Debug] Starting transcription...")
                 
                 segments, info = self.model.transcribe(
-                    temp_path,
+                    audio_array,
                     beam_size=1,        # Greedy decoding (fastest)
                     language="en",      # Skip language detection
                     vad_filter=False,   # Disable VAD for speed (we record clean audio)
@@ -925,9 +942,6 @@ class WhisperTypingApp:
                 
                 # Process text (punctuation, replacements)
                 processed_text = self.processor.process(raw_text)
-                
-                # Clean up
-                os.unlink(temp_path)
                 
                 if processed_text:
                     total_pipeline = timer.time() - start_time
