@@ -19,19 +19,49 @@ from pathlib import Path
 # Import our logger
 from logger import logger
 
-# GPU support disabled temporarily - ctranslate2 CUDA init hangs on this system
-# TODO: Debug CUDA conflict (possibly torch CPU-only package interfering)
+# Add CUDA libraries for GPU support (MUST be before importing faster_whisper)
+# Pre-load ALL DLLs explicitly - ctranslate2 needs them preloaded
 GPU_AVAILABLE = False
-print("[CPU] Using CPU mode (GPU disabled due to conflict)")
+try:
+    import site
+    user_site = site.USER_SITE
+    if user_site:
+        cuda_path = Path(user_site) / "nvidia"
+        if cuda_path.exists():
+            cudnn_bin = cuda_path / "cudnn" / "bin"
+            cublas_bin = cuda_path / "cublas" / "bin"
+            
+            # Add to DLL search paths
+            if cudnn_bin.exists():
+                os.add_dll_directory(str(cudnn_bin))
+            if cublas_bin.exists():
+                os.add_dll_directory(str(cublas_bin))
+            
+            # Add to PATH
+            os.environ['PATH'] = f"{cudnn_bin};{cublas_bin};" + os.environ.get('PATH', '')
+            
+            # Pre-load ALL DLLs explicitly (critical for ctranslate2 to find them)
+            dll_count = 0
+            for dll_dir in [cublas_bin, cudnn_bin]:
+                if dll_dir.exists():
+                    for dll in dll_dir.glob("*.dll"):
+                        try:
+                            ctypes.CDLL(str(dll))
+                            dll_count += 1
+                        except Exception:
+                            pass  # Some DLLs have dependencies, skip failures
+            
+            if dll_count > 0:
+                GPU_AVAILABLE = True
+                print(f"[CUDA] Loaded {dll_count} GPU libraries")
+except Exception as e:
+    print(f"[CUDA] GPU setup failed: {e} - using CPU")
+    GPU_AVAILABLE = False
 
-print("[1/5] Importing pyaudio...")
 import pyaudio
-print("[2/5] Importing faster_whisper...")
 from faster_whisper import WhisperModel
-print("[3/5] Core imports done")
 
 # Optional: pystray for system tray (graceful fallback if not installed)
-print("[4/5] Loading system tray...")
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -41,7 +71,6 @@ except ImportError:
     print("[Note] Install pystray and pillow for system tray: pip install pystray pillow")
 
 # UI module - try PyQt first, fallback to tkinter
-print("[5/5] Loading UI...")
 HAS_UI = False
 CognitiveFlowUI = None
 
@@ -56,8 +85,6 @@ except ImportError:
         print("[UI] Using tkinter (basic graphics)")
     except ImportError:
         print("[Note] No UI module found, running in console mode")
-
-print("[READY] All imports loaded")
 
 # Windows API constants
 WH_KEYBOARD_LL = 13
