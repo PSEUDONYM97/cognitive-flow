@@ -551,63 +551,61 @@ class SystemTray:
 
 
 class VirtualKeyboard:
-    """Type text using Windows SendInput API - works in admin windows"""
+    """Type text using clipboard + Ctrl+V - INSTANT and safe"""
     
     @staticmethod
     def type_text(text: str):
-        """Type text using batched SendInput - MAXIMUM SPEED"""
-        # Batch all characters into a single SendInput call for max speed
-        num_chars = len(text)
-        if num_chars == 0:
+        """Paste text via clipboard - fastest and safest method"""
+        if not text:
             return
         
-        # Each char needs 2 inputs (down + up)
-        inputs = (INPUT * (num_chars * 2))()
+        import pyperclip
         
-        for i, char in enumerate(text):
-            idx = i * 2
-            
-            # Key down
-            inputs[idx].type = INPUT_KEYBOARD
-            inputs[idx].union.ki.wVk = 0
-            inputs[idx].union.ki.wScan = ord(char)
-            inputs[idx].union.ki.dwFlags = KEYEVENTF_UNICODE
-            inputs[idx].union.ki.time = 0
-            inputs[idx].union.ki.dwExtraInfo = None
-            
-            # Key up
-            inputs[idx + 1].type = INPUT_KEYBOARD
-            inputs[idx + 1].union.ki.wVk = 0
-            inputs[idx + 1].union.ki.wScan = ord(char)
-            inputs[idx + 1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-            inputs[idx + 1].union.ki.time = 0
-            inputs[idx + 1].union.ki.dwExtraInfo = None
+        # Save current clipboard
+        try:
+            old_clipboard = pyperclip.paste()
+        except:
+            old_clipboard = ""
         
-        # Send all inputs in one call - MUCH faster
-        SendInput(num_chars * 2, inputs, ctypes.sizeof(INPUT))
-    
-    @staticmethod
-    def _send_unicode_char(char: str):
-        """Send a single unicode character"""
-        # Key down
-        inputs = (INPUT * 2)()
+        # Copy text to clipboard
+        pyperclip.copy(text)
         
+        # Send Ctrl+V to paste
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+        
+        inputs = (INPUT * 4)()
+        
+        # Ctrl down
         inputs[0].type = INPUT_KEYBOARD
-        inputs[0].union.ki.wVk = 0
-        inputs[0].union.ki.wScan = ord(char)
-        inputs[0].union.ki.dwFlags = KEYEVENTF_UNICODE
-        inputs[0].union.ki.time = 0
-        inputs[0].union.ki.dwExtraInfo = None
+        inputs[0].union.ki.wVk = VK_CONTROL
+        inputs[0].union.ki.dwFlags = 0
         
-        # Key up
+        # V down
         inputs[1].type = INPUT_KEYBOARD
-        inputs[1].union.ki.wVk = 0
-        inputs[1].union.ki.wScan = ord(char)
-        inputs[1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-        inputs[1].union.ki.time = 0
-        inputs[1].union.ki.dwExtraInfo = None
+        inputs[1].union.ki.wVk = VK_V
+        inputs[1].union.ki.dwFlags = 0
         
-        SendInput(2, inputs, ctypes.sizeof(INPUT))
+        # V up
+        inputs[2].type = INPUT_KEYBOARD
+        inputs[2].union.ki.wVk = VK_V
+        inputs[2].union.ki.dwFlags = KEYEVENTF_KEYUP
+        
+        # Ctrl up
+        inputs[3].type = INPUT_KEYBOARD
+        inputs[3].union.ki.wVk = VK_CONTROL
+        inputs[3].union.ki.dwFlags = KEYEVENTF_KEYUP
+        
+        SendInput(4, inputs, ctypes.sizeof(INPUT))
+        
+        # Small delay to let paste complete
+        time.sleep(0.05)
+        
+        # Restore old clipboard
+        try:
+            pyperclip.copy(old_clipboard)
+        except:
+            pass
 
 
 class WhisperTypingApp:
@@ -904,8 +902,10 @@ class WhisperTypingApp:
                 start_time = timer.time()
                 
                 # Convert audio frames to numpy array - NO FILE I/O
+                conv_start = timer.time()
                 audio_data = b''.join(self.frames)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                print(f"[Perf] Audio conversion: {timer.time() - conv_start:.3f}s")
                 
                 # Transcribe with optimizations
                 if self.model is None:
@@ -926,13 +926,16 @@ class WhisperTypingApp:
                     log_prob_threshold=-1.0,  # Default, but explicit
                 )
                 
-                transcribe_time = timer.time() - transcribe_start
-                print(f"[Debug] Transcription completed in {transcribe_time:.2f}s")
                 print(f"[Debug] Detected language: {info.language}, probability: {info.language_probability:.2f}")
                 
-                # Collect segments
+                # Force complete transcription by converting generator to list
+                segment_list = list(segments)
+                transcribe_time = timer.time() - transcribe_start
+                print(f"[Debug] Transcription completed in {transcribe_time:.2f}s ({len(segment_list)} segments)")
+                
+                # Collect segments (now instant since already processed)
                 segment_texts = []
-                for i, seg in enumerate(segments):
+                for i, seg in enumerate(segment_list):
                     print(f"[Debug] Segment {i}: '{seg.text.strip()}'")
                     segment_texts.append(seg.text.strip())
                 
@@ -941,7 +944,9 @@ class WhisperTypingApp:
                 print(f"[Debug] Total time: {timer.time() - start_time:.2f}s")
                 
                 # Process text (punctuation, replacements)
+                process_start = timer.time()
                 processed_text = self.processor.process(raw_text)
+                print(f"[Perf] Text processing: {timer.time() - process_start:.3f}s")
                 
                 if processed_text:
                     total_pipeline = timer.time() - start_time
