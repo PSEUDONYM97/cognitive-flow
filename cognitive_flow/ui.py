@@ -1,6 +1,5 @@
 """
-Cognitive Flow UI - Maximum Polish Edition
-Every detail refined. Professional settings screen. Perfect UX.
+Cognitive Flow UI - PyQt6 floating indicator and settings dialog.
 """
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, 
@@ -9,11 +8,13 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLa
 from PyQt6.QtCore import (Qt, QPropertyAnimation, QEasingCurve, pyqtProperty, 
                           QObject, pyqtSignal, QTimer, QPoint, QSize)
 from PyQt6.QtGui import (QPainter, QColor, QRadialGradient, QFont, QAction, 
-                         QPainterPath, QLinearGradient, QPen, QCursor)
+                         QPainterPath, QLinearGradient, QPen, QCursor, QGuiApplication)
 import sys
 import json
-from pathlib import Path
 from datetime import datetime
+
+from .paths import HISTORY_FILE
+
 
 # Professional color system
 COLORS = {
@@ -21,7 +22,7 @@ COLORS = {
     "bg_primary": QColor(16, 16, 18, 165),       # Main UI background
     "bg_secondary": QColor(28, 28, 32, 230),     # Settings/dialogs
     "bg_elevated": QColor(38, 38, 42, 245),      # Elevated surfaces
-    "bg_hover": QColor(255, 255, 255, 8),        # Hover states - very subtle (was 15)
+    "bg_hover": QColor(255, 255, 255, 8),        # Hover states
     
     # Borders and dividers
     "border_subtle": QColor(255, 255, 255, 20),
@@ -32,7 +33,7 @@ COLORS = {
     "text_secondary": QColor(255, 255, 255, 180),
     "text_muted": QColor(255, 255, 255, 120),
     
-    # State colors - vibrant and clear
+    # State colors
     "idle": QColor(16, 185, 129),          # Emerald
     "recording": QColor(239, 68, 68),      # Red
     "processing": QColor(245, 158, 11),    # Amber
@@ -43,8 +44,9 @@ COLORS = {
 
 class TranscriptionHistory:
     """Stores transcription history"""
-    def __init__(self, filepath: Path | None = None):
-        self.filepath = filepath or Path(__file__).parent / "history.json"
+    
+    def __init__(self):
+        self.filepath = HISTORY_FILE
         self.entries: list[dict] = self._load()
     
     def _load(self) -> list[dict]:
@@ -90,7 +92,6 @@ class SettingsDialog(QDialog):
         self.setFixedSize(480, 600)
         
         # Center on screen
-        from PyQt6.QtGui import QGuiApplication
         screen = QGuiApplication.primaryScreen()
         screen_geometry = screen.availableGeometry()
         self.move(
@@ -107,8 +108,8 @@ class SettingsDialog(QDialog):
         container = QFrame()
         container.setObjectName("settingsContainer")
         container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(40, 36, 40, 36)  # Even more breathing room
-        container_layout.setSpacing(32)  # Increased spacing between major sections
+        container_layout.setContentsMargins(40, 36, 40, 36)
+        container_layout.setSpacing(32)
         
         # Header
         header_layout = QHBoxLayout()
@@ -120,7 +121,7 @@ class SettingsDialog(QDialog):
         title.setFont(title_font)
         title.setStyleSheet(f"color: {COLORS['text_primary'].name()};")
         
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton("x")
         close_btn.setFixedSize(32, 32)
         close_btn.clicked.connect(self.close)
         close_btn.setObjectName("closeButton")
@@ -139,8 +140,8 @@ class SettingsDialog(QDialog):
         
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setSpacing(40)  # More space between sections
-        scroll_layout.setContentsMargins(0, 8, 16, 8)  # Add padding on sides and top/bottom
+        scroll_layout.setSpacing(40)
+        scroll_layout.setContentsMargins(0, 8, 16, 8)
         
         # Model Selection
         scroll_layout.addWidget(self._create_section_header("Transcription Model"))
@@ -177,9 +178,8 @@ class SettingsDialog(QDialog):
             stats = self.app_ref.stats.stats
             
             stats_grid = QVBoxLayout()
-            stats_grid.setSpacing(16)  # More space between stat rows
+            stats_grid.setSpacing(16)
             
-            # Personalized stats based on YOUR typing speed (30 WPM, 92% accuracy)
             avg_speed = self.app_ref.stats.get_avg_speed_ratio()
             avg_words = self.app_ref.stats.get_avg_words_per_recording()
             speaking_wpm = self.app_ref.stats.get_speaking_speed_wpm()
@@ -187,38 +187,24 @@ class SettingsDialog(QDialog):
             comparison = self.app_ref.stats.get_typing_vs_speaking_comparison()
             
             stats_items = [
-                # Core stats
                 ("Total Recordings", f"{stats.get('total_records', 0):,}"),
                 ("Words Transcribed", f"{stats.get('total_words', 0):,}"),
                 ("Total Audio Time", f"{stats.get('total_seconds', 0) / 60:.1f} min"),
-                
-                # Separator
                 ("", ""),
-                
-                # Speed comparison
                 ("Your Speaking Speed", f"{speaking_wpm:.0f} WPM"),
                 ("Your Typing Speed", "30 WPM"),
                 ("Seconds per Word", f"{seconds_per_word:.2f}s"),
-                
-                # Separator  
                 ("", ""),
-                
-                # Time analysis
                 ("Time Typing Would Take", f"{comparison['typing_time']:.0f} min"),
                 ("Time Speaking Took", f"{comparison['speaking_time']:.0f} min"),
                 ("Time Saved", self.app_ref.stats.get_time_saved()),
                 ("Efficiency Gain", f"{comparison['efficiency_ratio']:.1f}x faster"),
-                
-                # Separator
                 ("", ""),
-                
-                # Performance
                 ("Avg Words/Recording", f"{avg_words:.1f}"),
                 ("Avg Processing Speed", f"{avg_speed:.2f}x" if avg_speed > 0 else "N/A"),
             ]
             
             for label, value in stats_items:
-                # Skip empty separators visually but add spacing
                 if label == "":
                     stats_grid.addSpacing(12)
                     continue
@@ -370,8 +356,8 @@ class SettingsDialog(QDialog):
         """)
         
         layout = QVBoxLayout(widget)
-        layout.setSpacing(10)  # More space between text and meta
-        layout.setContentsMargins(16, 14, 16, 14)  # More padding inside history entries
+        layout.setSpacing(10)
+        layout.setContentsMargins(16, 14, 16, 14)
         
         # Text preview
         text_preview = entry.get('text', '')[:100]
@@ -415,7 +401,6 @@ class SettingsDialog(QDialog):
         """Handle model selection change"""
         print(f"[Settings] Model changed to: {model_name}")
         
-        # Update description based on model
         descriptions = {
             "tiny": "Fastest but least accurate - good for testing",
             "base": "Fast with reasonable accuracy",
@@ -426,7 +411,6 @@ class SettingsDialog(QDialog):
         
         self.model_desc.setText(descriptions.get(model_name, ""))
         
-        # Save to app config (requires restart to take effect)
         if self.app_ref:
             if hasattr(self.app_ref, 'model_name'):
                 self.app_ref.model_name = model_name
@@ -446,8 +430,8 @@ class SettingsDialog(QDialog):
         event.ignore()
 
 
-class MaxPolishIndicator(QWidget):
-    """Maximum polish floating indicator - every detail perfect"""
+class FloatingIndicator(QWidget):
+    """Floating indicator widget"""
     
     def __init__(self, on_click=None, get_last_transcription=None, show_settings=None):
         super().__init__()
@@ -474,22 +458,20 @@ class MaxPolishIndicator(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         
-        # Sleeker size: 180 x 40 (more compact)
         self.setFixedSize(180, 40)
         
-        # Position - use availableGeometry to account for taskbar
-        from PyQt6.QtGui import QGuiApplication
+        # Position
         screen = QGuiApplication.primaryScreen()
-        screen_geometry = screen.availableGeometry()  # Excludes taskbar
+        screen_geometry = screen.availableGeometry()
         margin = 24
         x = screen_geometry.x() + screen_geometry.width() - self.width() - margin
         y = screen_geometry.y() + screen_geometry.height() - self.height() - margin
         self.move(x, y)
-        print(f"[UI] Window positioned at ({x}, {y}) on screen {screen_geometry.width()}x{screen_geometry.height()}")
+        print(f"[UI] Window positioned at ({x}, {y})")
         
-        # Layout - account for dot space
+        # Layout
         layout = QHBoxLayout()
-        layout.setContentsMargins(40, 10, 14, 10)  # Left margin = 40 to make room for dot at x=22
+        layout.setContentsMargins(40, 10, 14, 10)
         layout.setSpacing(0)
         
         # Status label
@@ -519,7 +501,7 @@ class MaxPolishIndicator(QWidget):
         # Enable mouse tracking for hover
         self.setMouseTracking(True)
         
-        # Entry animation - store as instance variable to prevent garbage collection
+        # Entry animation
         self.setWindowOpacity(0)
         self.entry_anim = QPropertyAnimation(self, b"windowOpacity")
         self.entry_anim.setDuration(400)
@@ -557,17 +539,16 @@ class MaxPolishIndicator(QWidget):
     hover_opacity = pyqtProperty(float, get_hover_opacity, set_hover_opacity)
     
     def paintEvent(self, event):
-        """Maximum polish rendering"""
+        """Render the indicator"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         
         # Background path
-        bg_rect = self.rect().adjusted(0, 0, 0, 0)
+        bg_rect = self.rect()
         path = QPainterPath()
         path.addRoundedRect(bg_rect.x(), bg_rect.y(), bg_rect.width(), bg_rect.height(), 8, 8)
         
-        # Drop shadow - more visible
+        # Drop shadow
         shadow_offset = 3
         shadow_path = QPainterPath()
         shadow_path.addRoundedRect(
@@ -594,12 +575,12 @@ class MaxPolishIndicator(QWidget):
         painter.setPen(pen)
         painter.drawPath(path)
         
-        # Status dot - perfectly centered
+        # Status dot
         dot_x = 22
         dot_y = self.height() // 2
         dot_radius = 5
         
-        # Subtle glow when active
+        # Glow when active
         if self.state in ["recording", "processing"]:
             glow_radius = dot_radius + 6
             glow = QRadialGradient(dot_x, dot_y, glow_radius)
@@ -679,7 +660,7 @@ class MaxPolishIndicator(QWidget):
         self.text_color_animation.start()
     
     def show_context_menu(self, position):
-        """Styled context menu"""
+        """Context menu"""
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
@@ -721,7 +702,6 @@ class MaxPolishIndicator(QWidget):
                 print(f"[Clipboard] Copied: {text[:50]}{'...' if len(text) > 50 else ''}")
     
     def enterEvent(self, event):
-        """Hover enter"""
         self._is_hovered = True
         self.hover_animation.stop()
         self.hover_animation.setDuration(200)
@@ -732,7 +712,6 @@ class MaxPolishIndicator(QWidget):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
     
     def leaveEvent(self, event):
-        """Hover leave"""
         self._is_hovered = False
         self.hover_animation.stop()
         self.hover_animation.setDuration(200)
@@ -762,9 +741,10 @@ class MaxPolishIndicator(QWidget):
 
 
 class CognitiveFlowUI(QObject):
-    """Maximum polish UI coordinator"""
+    """UI coordinator"""
     
     state_changed = pyqtSignal(str, str)
+    show_settings_signal = pyqtSignal()
     
     def __init__(self, app):
         super().__init__()
@@ -775,6 +755,7 @@ class CognitiveFlowUI(QObject):
         self.settings_dialog = None
         
         self.state_changed.connect(self._update_indicator_state)
+        self.show_settings_signal.connect(self._show_settings_on_main_thread)
     
     def start(self):
         """Start Qt application"""
@@ -782,7 +763,7 @@ class CognitiveFlowUI(QObject):
         if self.qt_app is None:
             self.qt_app = QApplication(sys.argv)
         
-        self.indicator = MaxPolishIndicator(
+        self.indicator = FloatingIndicator(
             on_click=self.app.toggle_recording if hasattr(self.app, 'toggle_recording') else None,
             get_last_transcription=self.get_last_transcription,
             show_settings=self.show_settings
@@ -812,7 +793,11 @@ class CognitiveFlowUI(QObject):
         self.history.add(text, duration)
     
     def show_settings(self):
-        """Show settings dialog"""
+        """Show settings dialog - thread safe"""
+        self.show_settings_signal.emit()
+    
+    def _show_settings_on_main_thread(self):
+        """Actually show settings - called on Qt main thread"""
         if not self.settings_dialog:
             self.settings_dialog = SettingsDialog(parent=self.indicator, app_ref=self.app)
         self.settings_dialog.exec()
@@ -821,48 +806,3 @@ class CognitiveFlowUI(QObject):
         """Clean up"""
         if self.indicator:
             self.indicator.close()
-
-
-if __name__ == "__main__":
-    # Test
-    class TestApp:
-        def __init__(self, ui_ref):
-            self.ui = ui_ref
-            self.recording = False
-            
-            # Mock stats
-            class MockStats:
-                def __init__(self):
-                    self.stats = {
-                        'total_records': 1514,
-                        'total_words': 70779,
-                        'total_seconds': 15420,
-                    }
-                def get_time_saved(self):
-                    return "21.6 hours"
-            
-            self.stats = MockStats()
-        
-        def toggle_recording(self):
-            self.recording = not self.recording
-            if self.recording:
-                print("[Test] Recording")
-                self.ui.set_state("recording")
-            else:
-                print("[Test] Processing")
-                self.ui.set_state("processing")
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(2000, lambda: self.ui.set_state("idle"))
-    
-    test_app = TestApp(None)
-    ui = CognitiveFlowUI(test_app)
-    test_app.ui = ui
-    ui.start()
-    ui.set_state("idle", "Ready")
-    
-    print("Maximum Polish UI Test")
-    print("- Hover for visual feedback")
-    print("- Right-click for menu with settings")
-    print("- Click to toggle recording")
-    
-    sys.exit(ui.qt_app.exec())

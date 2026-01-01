@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 from enum import Enum
 
+
 class LogLevel(Enum):
     DEBUG = "DEBUG"
     INFO = "INFO"
@@ -32,11 +33,11 @@ class ColoredLogger:
     
     # Emoji/symbols for each level
     SYMBOLS = {
-        'DEBUG': '🔍',
-        'INFO': 'ℹ️ ',
-        'SUCCESS': '✓',
-        'WARNING': '⚠️ ',
-        'ERROR': '✗'
+        'DEBUG': '',
+        'INFO': '',
+        'SUCCESS': '',
+        'WARNING': '',
+        'ERROR': ''
     }
     
     def __init__(self, use_colors=True, use_symbols=False):

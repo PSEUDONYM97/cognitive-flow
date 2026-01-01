@@ -1,6 +1,6 @@
 """
-Cognitive Flow - Local voice-to-text with global hotkey
-Press tilde (~) to start/stop recording, transcribes and types into focused app
+Cognitive Flow - Main application module.
+Local voice-to-text with global hotkey.
 """
 
 import ctypes
@@ -16,11 +16,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Import our logger
-from logger import logger
+from .logger import logger
+from .paths import CONFIG_FILE, STATS_FILE
 
 # Add CUDA libraries for GPU support (MUST be before importing faster_whisper)
-# Pre-load ALL DLLs explicitly - ctranslate2 needs them preloaded
 GPU_AVAILABLE = False
 try:
     import site
@@ -31,16 +30,13 @@ try:
             cudnn_bin = cuda_path / "cudnn" / "bin"
             cublas_bin = cuda_path / "cublas" / "bin"
             
-            # Add to DLL search paths
             if cudnn_bin.exists():
                 os.add_dll_directory(str(cudnn_bin))
             if cublas_bin.exists():
                 os.add_dll_directory(str(cublas_bin))
             
-            # Add to PATH
             os.environ['PATH'] = f"{cudnn_bin};{cublas_bin};" + os.environ.get('PATH', '')
             
-            # Pre-load ALL DLLs explicitly (critical for ctranslate2 to find them)
             dll_count = 0
             for dll_dir in [cublas_bin, cudnn_bin]:
                 if dll_dir.exists():
@@ -49,7 +45,7 @@ try:
                             ctypes.CDLL(str(dll))
                             dll_count += 1
                         except Exception:
-                            pass  # Some DLLs have dependencies, skip failures
+                            pass
             
             if dll_count > 0:
                 GPU_AVAILABLE = True
@@ -61,7 +57,7 @@ except Exception as e:
 import pyaudio
 from faster_whisper import WhisperModel
 
-# Optional: pystray for system tray (graceful fallback if not installed)
+# Optional: pystray for system tray
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -70,34 +66,28 @@ except ImportError:
     HAS_TRAY = False
     print("[Note] Install pystray and pillow for system tray: pip install pystray pillow")
 
-# UI module - try PyQt first, fallback to tkinter
+# UI module
 HAS_UI = False
 CognitiveFlowUI = None
 
 try:
-    from cognitive_flow_ui_qt import CognitiveFlowUI
+    from .ui import CognitiveFlowUI
     HAS_UI = True
-    print("[UI] Using PyQt6 (smooth graphics)")
-except ImportError:
-    try:
-        from cognitive_flow_ui import CognitiveFlowUI
-        HAS_UI = True
-        print("[UI] Using tkinter (basic graphics)")
-    except ImportError:
-        print("[Note] No UI module found, running in console mode")
+    print("[UI] Using PyQt6")
+except ImportError as e:
+    print(f"[Note] No UI module: {e}")
 
 # Windows API constants
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
-VK_OEM_3 = 0xC0  # Tilde/backtick key
+VK_OEM_3 = 0xC0  # Tilde key
 
-# For virtual keyboard input
 INPUT_KEYBOARD = 1
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
 
-# Windows structures for keyboard hook
+
 class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
         ("vkCode", ctypes.wintypes.DWORD),
@@ -107,7 +97,7 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
         ("dwExtraInfo", ctypes.POINTER(ctypes.wintypes.ULONG))
     ]
 
-# For SendInput
+
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [
         ("wVk", ctypes.wintypes.WORD),
@@ -117,12 +107,14 @@ class KEYBDINPUT(ctypes.Structure):
         ("dwExtraInfo", ctypes.POINTER(ctypes.wintypes.ULONG))
     ]
 
+
 class HARDWAREINPUT(ctypes.Structure):
     _fields_ = [
         ("uMsg", ctypes.wintypes.DWORD),
         ("wParamL", ctypes.wintypes.WORD),
         ("wParamH", ctypes.wintypes.WORD)
     ]
+
 
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [
@@ -134,6 +126,7 @@ class MOUSEINPUT(ctypes.Structure):
         ("dwExtraInfo", ctypes.POINTER(ctypes.wintypes.ULONG))
     ]
 
+
 class INPUT_UNION(ctypes.Union):
     _fields_ = [
         ("ki", KEYBDINPUT),
@@ -141,13 +134,14 @@ class INPUT_UNION(ctypes.Union):
         ("hi", HARDWAREINPUT)
     ]
 
+
 class INPUT(ctypes.Structure):
     _fields_ = [
         ("type", ctypes.wintypes.DWORD),
         ("union", INPUT_UNION)
     ]
 
-# Windows API functions
+
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
@@ -158,34 +152,27 @@ GetMessageW = user32.GetMessageW
 SendInput = user32.SendInput
 GetForegroundWindow = user32.GetForegroundWindow
 
-# Hook procedure type
 HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.POINTER(KBDLLHOOKSTRUCT))
 
 
 class Statistics:
-    """Track usage statistics, ported from WhisperTyping"""
+    """Track usage statistics"""
     
     def __init__(self, stats_file: str | None = None):
-        if stats_file is None:
-            self.stats_file = Path(__file__).parent / "statistics.json"
-        else:
-            self.stats_file = Path(stats_file)
-        
+        self.stats_file = Path(stats_file) if stats_file else STATS_FILE
         self.stats: dict = self._load_stats()
     
     def _load_stats(self) -> dict:
-        """Load stats, importing from WhisperTyping if this is first run"""
         if self.stats_file.exists():
             with open(self.stats_file, 'r') as f:
                 return json.load(f)
         
         # Try to import from WhisperTyping
-        wt_stats = Path(os.environ['LOCALAPPDATA']) / "WhisperTyping" / "statistics.json"
+        wt_stats = Path(os.environ.get('LOCALAPPDATA', '')) / "WhisperTyping" / "statistics.json"
         if wt_stats.exists():
             print(f"[Stats] Importing from WhisperTyping...")
             with open(wt_stats, 'r') as f:
                 imported = json.load(f)
-            # Convert to our format
             stats = {
                 "total_seconds": imported.get("TotalSeconds", 0),
                 "total_records": imported.get("TotalRecords", 0),
@@ -197,7 +184,6 @@ class Statistics:
             self._save(stats)
             return stats
         
-        # Fresh start with enhanced metrics
         return {
             "total_seconds": 0,
             "total_records": 0,
@@ -205,14 +191,9 @@ class Statistics:
             "total_characters": 0,
             "last_used": "",
             "imported_from_whispertyping": False,
-            "total_processing_time": 0,  # Total time spent processing
-            "session_stats": {
-                "records": 0,
-                "words": 0,
-                "characters": 0,
-                "processing_time": 0
-            },
-            "performance_history": []  # Last 100 transcriptions
+            "total_processing_time": 0,
+            "session_stats": {"records": 0, "words": 0, "characters": 0, "processing_time": 0},
+            "performance_history": []
         }
     
     def _save(self, stats: dict | None = None):
@@ -222,11 +203,9 @@ class Statistics:
             json.dump(stats, f, indent=2)
     
     def record(self, duration_seconds: float, text: str, processing_time: float = 0):
-        """Record a transcription with enhanced metrics"""
         words = len(text.split())
         chars = len(text)
         
-        # Update totals
         self.stats["total_seconds"] += duration_seconds
         self.stats["total_records"] += 1
         self.stats["total_words"] += words
@@ -234,7 +213,6 @@ class Statistics:
         self.stats["total_processing_time"] = self.stats.get("total_processing_time", 0) + processing_time
         self.stats["last_used"] = datetime.now().isoformat()
         
-        # Update session stats
         if "session_stats" not in self.stats:
             self.stats["session_stats"] = {"records": 0, "words": 0, "characters": 0, "processing_time": 0}
         
@@ -243,7 +221,6 @@ class Statistics:
         self.stats["session_stats"]["characters"] += chars
         self.stats["session_stats"]["processing_time"] += processing_time
         
-        # Track performance history (last 100)
         if "performance_history" not in self.stats:
             self.stats["performance_history"] = []
         
@@ -261,31 +238,21 @@ class Statistics:
         self._save()
     
     def get_time_saved(self) -> str:
-        """Calculate time saved using YOUR actual typing speed (30 WPM)"""
         words = self.stats["total_words"]
         audio_seconds = self.stats["total_seconds"]
-        
-        # Your actual typing speed: 30 WPM (from test)
         typing_time_minutes = words / 30
-        
-        # Actual speaking time (from recorded audio)
         speaking_time_minutes = audio_seconds / 60
-        
-        # Time saved = what typing would have taken - what speaking took
         saved_minutes = typing_time_minutes - speaking_time_minutes
         
         if saved_minutes < 60:
             return f"{saved_minutes:.0f} minutes"
         else:
-            hours = saved_minutes / 60
-            return f"{hours:.1f} hours"
+            return f"{saved_minutes / 60:.1f} hours"
     
     def get_typing_vs_speaking_comparison(self) -> dict:
-        """Get detailed comparison of typing time vs speaking time"""
         words = self.stats["total_words"]
         audio_seconds = self.stats["total_seconds"]
-        
-        typing_time_minutes = words / 30  # Your 30 WPM
+        typing_time_minutes = words / 30
         speaking_time_minutes = audio_seconds / 60
         
         return {
@@ -296,25 +263,18 @@ class Statistics:
         }
     
     def get_speaking_speed_wpm(self) -> float:
-        """Calculate your average speaking speed in words per minute"""
         words = self.stats["total_words"]
         audio_seconds = self.stats["total_seconds"]
-        
         if audio_seconds == 0:
             return 0
-        
-        minutes = audio_seconds / 60
-        return words / minutes if minutes > 0 else 0
+        return words / (audio_seconds / 60)
     
     def get_seconds_per_word(self) -> float:
-        """Calculate average seconds per word when speaking"""
         words = self.stats["total_words"]
         audio_seconds = self.stats["total_seconds"]
-        
         return audio_seconds / words if words > 0 else 0
     
     def summary(self) -> str:
-        """Get a summary string"""
         return (
             f"Recordings: {self.stats['total_records']:,} | "
             f"Words: {self.stats['total_words']:,} | "
@@ -322,7 +282,6 @@ class Statistics:
         )
     
     def get_avg_speed_ratio(self) -> float:
-        """Get average processing speed ratio"""
         history = self.stats.get("performance_history", [])
         if not history:
             return 0
@@ -330,81 +289,48 @@ class Statistics:
         return sum(ratios) / len(ratios) if ratios else 0
     
     def get_avg_words_per_recording(self) -> float:
-        """Get average words per recording"""
         records = self.stats.get("total_records", 0)
         if records == 0:
             return 0
         return self.stats.get("total_words", 0) / records
-    
-    def reset_session_stats(self):
-        """Reset session statistics"""
-        self.stats["session_stats"] = {
-            "records": 0,
-            "words": 0,
-            "characters": 0,
-            "processing_time": 0
-        }
-        self._save()
 
 
 class TextProcessor:
-    """Process transcribed text - punctuation, replacements, etc."""
+    """Process transcribed text"""
     
-    # Spoken punctuation mappings
     PUNCTUATION = {
-        "period": ".",
-        "full stop": ".",
-        "comma": ",",
-        "question mark": "?",
-        "exclamation mark": "!",
-        "exclamation point": "!",
-        "colon": ":",
-        "semicolon": ";",
-        "semi colon": ";",
-        "dash": "-",
-        "hyphen": "-",
-        "open parenthesis": "(",
-        "close parenthesis": ")",
-        "open bracket": "[",
-        "close bracket": "]",
-        "open brace": "{",
-        "close brace": "}",
-        "apostrophe": "'",
-        "quote": '"',
-        "open quote": '"',
-        "close quote": '"',
-        "ellipsis": "...",
-        "new line": "\n",
-        "newline": "\n",
-        "new paragraph": "\n\n",
-        "enter": "\n",
+        "period": ".", "full stop": ".", "comma": ",", "question mark": "?",
+        "exclamation mark": "!", "exclamation point": "!", "colon": ":",
+        "semicolon": ";", "semi colon": ";", "dash": "-", "hyphen": "-",
+        "open parenthesis": "(", "close parenthesis": ")", "open bracket": "[",
+        "close bracket": "]", "open brace": "{", "close brace": "}",
+        "apostrophe": "'", "quote": '"', "open quote": '"', "close quote": '"',
+        "ellipsis": "...", "new line": "\n", "newline": "\n",
+        "new paragraph": "\n\n", "enter": "\n",
     }
     
-    # Custom replacements (from WhisperTyping settings)
-    REPLACEMENTS = {
-        "hashtag": "#",
-        "clod": "CLAUDE",
+    REPLACEMENTS = {"hashtag": "#", "clod": "CLAUDE"}
+    
+    CHAR_NORMALIZE = {
+        "'": "'", "'": "'", '"': '"', '"': '"',
+        "-": "-", "--": "-", "...": "...",
     }
     
     def process(self, text: str) -> str:
-        """Process transcribed text"""
         if not text:
             return text
         
-        # Apply custom replacements first (case-insensitive)
+        for fancy, simple in self.CHAR_NORMALIZE.items():
+            text = text.replace(fancy, simple)
+        
         for word, replacement in self.REPLACEMENTS.items():
-            # Case-insensitive replacement
             import re
             pattern = re.compile(re.escape(word), re.IGNORECASE)
             text = pattern.sub(replacement, text)
         
-        # Apply spoken punctuation
         for spoken, punct in self.PUNCTUATION.items():
-            # Replace spoken punctuation with actual punctuation
-            # Handle "word period" -> "word."
             text = text.replace(f" {spoken}", punct)
             text = text.replace(f"{spoken} ", f"{punct} ")
-            # Handle at end of text
             if text.lower().endswith(spoken):
                 text = text[:-len(spoken)] + punct
         
@@ -412,125 +338,91 @@ class TextProcessor:
 
 
 class SoundEffects:
-    """Simple sound effects using winsound"""
-    
     @staticmethod
     def play_start():
-        """Play start recording sound"""
         import winsound
-        # High beep for start
         winsound.Beep(800, 150)
     
     @staticmethod
     def play_stop():
-        """Play stop recording sound"""
         import winsound
-        # Lower beep for stop
         winsound.Beep(400, 150)
     
     @staticmethod
     def play_error():
-        """Play error sound"""
         import winsound
         winsound.Beep(200, 300)
 
 
 class SystemTray:
-    """System tray icon with status indicator"""
-    
-    def __init__(self, app: "WhisperTypingApp"):
+    def __init__(self, app: "CognitiveFlowApp"):
         self.app = app
         self.icon = None
-        
+    
     def create_icon(self, recording: bool = False, loading: bool = False) -> "Image.Image":
-        """Create a tray icon image"""
         size = 64
         img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
         if loading:
-            # Yellow circle while loading
             draw.ellipse([4, 4, size-4, size-4], fill=(255, 200, 0, 255))
         elif recording:
-            # Red circle when recording
             draw.ellipse([4, 4, size-4, size-4], fill=(255, 50, 50, 255))
         else:
-            # Green circle when ready
             draw.ellipse([4, 4, size-4, size-4], fill=(50, 200, 50, 255))
         
         return img
     
     def update_icon(self, recording: bool = False, loading: bool = False):
-        """Update the tray icon state"""
         if self.icon:
             self.icon.icon = self.create_icon(recording, loading)
     
     def on_quit(self, icon, item):
-        """Handle quit from tray menu"""
-        import sys
-        import os
-        import threading
-        
-        print("\n[Exit] Quit from system tray - starting cleanup...")
+        print("\n[Exit] Quit from system tray...")
         self.app.running = False
         
-        # Stop icon first (this is blocking the exit)
-        print("[Exit] Stopping tray icon...")
+        # Stop icon first
         try:
             icon.visible = False
             icon.stop()
-        except Exception as e:
-            print(f"[Exit] Tray icon error: {e}")
+        except:
+            pass
         
         # Unhook keyboard
-        print("[Exit] Removing keyboard hook...")
         try:
             if self.app.hook:
                 UnhookWindowsHookEx(self.app.hook)
                 self.app.hook = None
-        except Exception as e:
-            print(f"[Exit] Hook error: {e}")
-        
-        # Close Qt UI - SKIP GRACEFUL SHUTDOWN, just force exit
-        print("[Exit] Closing Qt UI...")
-        # Don't even try to clean up Qt - it hangs
-        # Just let os._exit() kill everything
+        except:
+            pass
         
         # Terminate audio
-        print("[Exit] Terminating audio...")
         try:
             if self.app.audio:
                 self.app.audio.terminate()
-        except Exception as e:
-            print(f"[Exit] Audio error: {e}")
+        except:
+            pass
         
         # Post quit to Windows message loop
-        print("[Exit] Posting quit message...")
         try:
             ctypes.windll.user32.PostQuitMessage(0)
-        except Exception as e:
-            print(f"[Exit] PostQuit error: {e}")
+        except:
+            pass
         
-        # Force exit NOW - no waiting
         print("[Exit] Goodbye!")
-        os._exit(0)  # Nuclear option - immediate exit
+        
+        # Force immediate exit - use sys.exit in a thread to ensure it runs
+        import signal
+        os.kill(os.getpid(), signal.SIGTERM)
     
     def on_show_stats(self, icon, item):
-        """Show settings dialog (not old MessageBox)"""
         if self.app.ui:
             self.app.ui.show_settings()
         else:
-            # Fallback to old message box if no UI
             stats = self.app.stats.summary()
-            ctypes.windll.user32.MessageBoxW(
-                None, 
-                stats, 
-                "Cognitive Flow Stats", 
-                0x40  # MB_ICONINFORMATION
-            )
+            ctypes.windll.user32.MessageBoxW(None, stats, "Cognitive Flow Stats", 0x40)
     
     def run(self):
-        """Run the system tray icon"""
         if not HAS_TRAY:
             return
         
@@ -546,70 +438,54 @@ class SystemTray:
             menu
         )
         
-        # Run in background thread
         threading.Thread(target=self.icon.run, daemon=True).start()
 
 
 class VirtualKeyboard:
-    """Type text using clipboard + Ctrl+V - INSTANT and safe"""
-    
     @staticmethod
     def type_text(text: str):
-        """Paste text via clipboard - fastest and safest method"""
         if not text:
             return
         
-        import pyperclip
+        BATCH_SIZE = 100
+        BATCH_DELAY = 0
         
-        # Save current clipboard
-        try:
-            old_clipboard = pyperclip.paste()
-        except:
-            old_clipboard = ""
+        for i in range(0, len(text), BATCH_SIZE):
+            batch = text[i:i + BATCH_SIZE]
+            VirtualKeyboard._type_batch(batch)
+            if i + BATCH_SIZE < len(text):
+                time.sleep(BATCH_DELAY)
+    
+    @staticmethod
+    def _type_batch(text: str):
+        num_chars = len(text)
+        if num_chars == 0:
+            return
         
-        # Copy text to clipboard
-        pyperclip.copy(text)
+        inputs = (INPUT * (num_chars * 2))()
         
-        # Send Ctrl+V to paste
-        VK_CONTROL = 0x11
-        VK_V = 0x56
+        for i, char in enumerate(text):
+            idx = i * 2
+            
+            inputs[idx].type = INPUT_KEYBOARD
+            inputs[idx].union.ki.wVk = 0
+            inputs[idx].union.ki.wScan = ord(char)
+            inputs[idx].union.ki.dwFlags = KEYEVENTF_UNICODE
+            inputs[idx].union.ki.time = 0
+            inputs[idx].union.ki.dwExtraInfo = None
+            
+            inputs[idx + 1].type = INPUT_KEYBOARD
+            inputs[idx + 1].union.ki.wVk = 0
+            inputs[idx + 1].union.ki.wScan = ord(char)
+            inputs[idx + 1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+            inputs[idx + 1].union.ki.time = 0
+            inputs[idx + 1].union.ki.dwExtraInfo = None
         
-        inputs = (INPUT * 4)()
-        
-        # Ctrl down
-        inputs[0].type = INPUT_KEYBOARD
-        inputs[0].union.ki.wVk = VK_CONTROL
-        inputs[0].union.ki.dwFlags = 0
-        
-        # V down
-        inputs[1].type = INPUT_KEYBOARD
-        inputs[1].union.ki.wVk = VK_V
-        inputs[1].union.ki.dwFlags = 0
-        
-        # V up
-        inputs[2].type = INPUT_KEYBOARD
-        inputs[2].union.ki.wVk = VK_V
-        inputs[2].union.ki.dwFlags = KEYEVENTF_KEYUP
-        
-        # Ctrl up
-        inputs[3].type = INPUT_KEYBOARD
-        inputs[3].union.ki.wVk = VK_CONTROL
-        inputs[3].union.ki.dwFlags = KEYEVENTF_KEYUP
-        
-        SendInput(4, inputs, ctypes.sizeof(INPUT))
-        
-        # Small delay to let paste complete
-        time.sleep(0.05)
-        
-        # Restore old clipboard
-        try:
-            pyperclip.copy(old_clipboard)
-        except:
-            pass
+        SendInput(num_chars * 2, inputs, ctypes.sizeof(INPUT))
 
 
-class WhisperTypingApp:
-    """Main application - global hotkey, recording, transcription, typing"""
+class CognitiveFlowApp:
+    """Main application"""
     
     def __init__(self):
         self.is_recording = False
@@ -617,35 +493,28 @@ class WhisperTypingApp:
         self.record_start_time: float = 0.0
         self.audio_queue = queue.Queue()
         
-        # Audio settings
         self.CHUNK = 1024
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
         self.RATE = 16000
         self.audio = pyaudio.PyAudio()
         
-        # Components
         self.stats = Statistics()
         self.processor = TextProcessor()
         self.model: WhisperModel | None = None
         self.model_loading = False
         self.using_gpu = False
         
-        # System tray
         self.tray: SystemTray | None = None
         if HAS_TRAY:
             self.tray = SystemTray(self)
         
-        # UI
         self.ui = None
         if HAS_UI:
             self.ui = CognitiveFlowUI(self)
         
-        # Hook handle
         self.hook = None
-        self.hook_proc = None  # Must keep reference to prevent GC
-        
-        # For clean shutdown
+        self.hook_proc = None
         self.running = True
         
         logger.header("Cognitive Flow - Local Voice-to-Text")
@@ -656,13 +525,11 @@ class WhisperTypingApp:
         logger.info("Controls", "Right-click - Open settings")
         logger.separator()
         
-        # Load config (model preference)
-        self.config_file = Path(__file__).parent / "config.json"
+        self.config_file = CONFIG_FILE
         self.model_name = self._load_config()
         logger.info("Model", f"Loading Whisper model ({self.model_name})...")
     
     def _load_config(self) -> str:
-        """Load configuration from file"""
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
@@ -673,63 +540,55 @@ class WhisperTypingApp:
         return 'medium'
     
     def save_config(self):
-        """Save configuration to file"""
         config = {'model_name': self.model_name}
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
         print(f"[Config] Saved model preference: {self.model_name}")
     
     def load_model(self):
-        """Load Whisper model in background - GPU if available, CPU fallback"""
         self.model_loading = True
         
         def _load():
             try:
-                # Try GPU first if available
                 if GPU_AVAILABLE:
                     print(f"[GPU] Loading {self.model_name} model on CUDA...")
                     try:
                         self.model = WhisperModel(
                             self.model_name,
                             device="cuda",
-                            compute_type="float32",  # Most compatible, still fast
+                            compute_type="float32",
                             device_index=0
                         )
                         self.using_gpu = True
                         print(f"[GPU] Model loaded successfully!")
                         
-                        # Warmup inference - first run is always slower
+                        # Warmup
                         print("[GPU] Warming up model...")
                         import numpy as np
-                        import wave as wav_module
                         warmup_audio = tempfile.mktemp(suffix=".wav")
-                        # 1 second of silence
                         samples = np.zeros(16000, dtype=np.int16)
+                        import wave as wav_module
                         wf = wav_module.open(warmup_audio, 'wb')
                         wf.setnchannels(1)
                         wf.setsampwidth(2)
                         wf.setframerate(16000)
                         wf.writeframes(samples.tobytes())
                         wf.close()
-                        # Run warmup transcription
                         list(self.model.transcribe(warmup_audio, beam_size=1, language="en"))
                         os.unlink(warmup_audio)
-                        print("[GPU] Warmup complete - model ready")
+                        print("[GPU] Warmup complete")
                         
-                        print(f"[Ready] Model: {self.model_name} (GPU) | Press ~ to record")
-                        print(f"[Stats] {self.stats.summary()}")
+                        print(f"[Ready] Model: {self.model_name} (GPU)")
                         if self.tray:
                             self.tray.update_icon(recording=False, loading=False)
                             self.tray.icon.title = "Cognitive Flow - Ready (GPU)"
                         if self.ui:
-                            self.ui.set_state("idle", "Ready (GPU) - Press ~ to record")
+                            self.ui.set_state("idle", "Ready (GPU)")
                         return
                     except Exception as gpu_err:
                         print(f"[GPU] Failed: {gpu_err}")
-                        print("[GPU] Falling back to CPU...")
                 
-                # CPU fallback
-                print(f"[CPU] Loading {self.model_name} model on CPU...")
+                print(f"[CPU] Loading {self.model_name} model...")
                 self.model = WhisperModel(
                     self.model_name,
                     device="cpu",
@@ -738,23 +597,19 @@ class WhisperTypingApp:
                     num_workers=1
                 )
                 self.using_gpu = False
-                print("[CPU] Model loaded successfully!")
-                print(f"[Ready] Model: {self.model_name} (CPU) | Press ~ to record")
-                print(f"[Stats] {self.stats.summary()}")
+                print(f"[Ready] Model: {self.model_name} (CPU)")
                 if self.tray:
                     self.tray.update_icon(recording=False, loading=False)
                     self.tray.icon.title = "Cognitive Flow - Ready (CPU)"
                 if self.ui:
-                    self.ui.set_state("idle", "Ready (CPU) - Press ~ to record")
+                    self.ui.set_state("idle", "Ready (CPU)")
                     
             except Exception as e:
-                print(f"[Error] Failed to load {self.model_name}: {e}")
-                print("[Fallback] Trying 'base' model on CPU...")
+                print(f"[Error] Failed to load: {e}")
                 try:
                     self.model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=4)
                     self.model_name = "base"
-                    self.using_gpu = False
-                    print("[Ready] Using base model (CPU). Press ~ to record")
+                    print("[Ready] Using base model (CPU)")
                 except Exception as e2:
                     print(f"[Fatal] Could not load any model: {e2}")
             finally:
@@ -763,50 +618,26 @@ class WhisperTypingApp:
         threading.Thread(target=_load, daemon=True).start()
     
     def keyboard_callback(self, nCode, wParam, lParam):
-        """Low-level keyboard hook callback"""
         if nCode >= 0:
             kb = lParam.contents
-            
-            # Check for tilde key (OEM_3)
             if kb.vkCode == VK_OEM_3:
                 if wParam == WM_KEYDOWN:
-                    # Toggle recording on key down
                     self.toggle_recording()
-                    # Return 1 to block the key from reaching other apps
                     return 1
-        
         return CallNextHookEx(self.hook, nCode, wParam, lParam)
     
     def install_hook(self):
-        """Install the low-level keyboard hook"""
-        # Need to use SetLastError pattern for proper error reporting
         ctypes.windll.kernel32.SetLastError(0)
-        
         self.hook_proc = HOOKPROC(self.keyboard_callback)
-        
-        # For low-level hooks, hMod should be NULL (0) - this works better with Python
-        # Error 126 means GetModuleHandleW returned something invalid
-        self.hook = SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            self.hook_proc,
-            None,  # NULL for low-level hooks
-            0
-        )
+        self.hook = SetWindowsHookExW(WH_KEYBOARD_LL, self.hook_proc, None, 0)
         
         if not self.hook:
             error = ctypes.windll.kernel32.GetLastError()
-            print(f"[Error] Failed to install keyboard hook (error code: {error})")
-            print("[Note] This app must be run from a terminal window, not as a subprocess")
-            print("[Tip] Open a new terminal and run: python cognitive_flow.py")
             raise RuntimeError(f"Failed to install keyboard hook (error: {error})")
         
         print("[Hook] Global keyboard hook installed")
     
     def message_loop(self):
-        """
-        Hybrid Windows + Qt message loop
-        Process Windows messages (for keyboard hook) AND Qt events (for UI)
-        """
         msg = ctypes.wintypes.MSG()
         PeekMessageW = user32.PeekMessageW
         TranslateMessage = user32.TranslateMessage
@@ -814,23 +645,18 @@ class WhisperTypingApp:
         PM_REMOVE = 0x0001
         
         while self.running:
-            # Process Qt events (non-blocking)
             if self.ui and self.ui.qt_app:
                 self.ui.qt_app.processEvents()
             
-            # Check for Windows messages (non-blocking peek)
             if PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
-                if msg.message == 0x0012:  # WM_QUIT
+                if msg.message == 0x0012:
                     break
                 TranslateMessage(ctypes.byref(msg))
                 DispatchMessageW(ctypes.byref(msg))
             else:
-                # No messages - sleep briefly to avoid CPU spin
-                import time
-                time.sleep(0.001)  # 1ms sleep
+                time.sleep(0.001)
     
     def toggle_recording(self):
-        """Toggle recording state"""
         if self.model_loading:
             logger.warning("Record", "Model still loading...")
             return
@@ -846,7 +672,6 @@ class WhisperTypingApp:
             self.stop_recording()
     
     def start_recording(self):
-        """Start recording audio"""
         self.is_recording = True
         self.frames = []
         self.record_start_time = time.time()
@@ -857,7 +682,7 @@ class WhisperTypingApp:
         if self.tray:
             self.tray.update_icon(recording=True)
         if self.ui:
-            self.ui.set_state("recording", "● Recording...")
+            self.ui.set_state("recording", "Recording...")
         
         def _record():
             stream = self.audio.open(
@@ -882,7 +707,6 @@ class WhisperTypingApp:
         threading.Thread(target=_record, daemon=True).start()
     
     def stop_recording(self):
-        """Stop recording and transcribe"""
         self.is_recording = False
         duration = time.time() - self.record_start_time
         
@@ -894,117 +718,76 @@ class WhisperTypingApp:
         if self.ui:
             self.ui.set_state("processing", "Processing...")
         
-        # Transcribe in background
         def _transcribe():
             try:
-                import time as timer
                 import numpy as np
-                start_time = timer.time()
+                start_time = time.time()
                 
-                # Convert audio frames to numpy array - NO FILE I/O
-                conv_start = timer.time()
                 audio_data = b''.join(self.frames)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-                print(f"[Perf] Audio conversion: {timer.time() - conv_start:.3f}s")
                 
-                # Transcribe with optimizations
                 if self.model is None:
                     raise RuntimeError("Model not loaded")
                 
-                transcribe_start = timer.time()
-                print(f"[Debug] Starting transcription...")
-                
                 segments, info = self.model.transcribe(
                     audio_array,
-                    beam_size=1,        # Greedy decoding (fastest)
-                    language="en",      # Skip language detection
-                    vad_filter=False,   # Disable VAD for speed (we record clean audio)
-                    word_timestamps=False,  # Don't need word-level timing
-                    condition_on_previous_text=True,  # Keep context across pauses
-                    no_speech_threshold=0.9,  # Higher threshold - don't cut on pauses
-                    hallucination_silence_threshold=None,  # Don't cut on silence
-                    log_prob_threshold=-1.0,  # Default, but explicit
+                    beam_size=1,
+                    language="en",
+                    vad_filter=False,
+                    word_timestamps=False,
+                    condition_on_previous_text=True,
+                    no_speech_threshold=0.9,
+                    hallucination_silence_threshold=None,
                 )
                 
-                print(f"[Debug] Detected language: {info.language}, probability: {info.language_probability:.2f}")
-                
-                # Force complete transcription by converting generator to list
                 segment_list = list(segments)
-                transcribe_time = timer.time() - transcribe_start
-                print(f"[Debug] Transcription completed in {transcribe_time:.2f}s ({len(segment_list)} segments)")
-                
-                # Collect segments (now instant since already processed)
-                segment_texts = []
-                for i, seg in enumerate(segment_list):
-                    print(f"[Debug] Segment {i}: '{seg.text.strip()}'")
-                    segment_texts.append(seg.text.strip())
-                
+                segment_texts = [seg.text.strip() for seg in segment_list]
                 raw_text = " ".join(segment_texts)
-                print(f"[Debug] Raw transcription: '{raw_text[:100]}...'")
-                print(f"[Debug] Total time: {timer.time() - start_time:.2f}s")
                 
-                # Process text (punctuation, replacements)
-                process_start = timer.time()
                 processed_text = self.processor.process(raw_text)
-                print(f"[Perf] Text processing: {timer.time() - process_start:.3f}s")
                 
                 if processed_text:
-                    total_pipeline = timer.time() - start_time
+                    total_pipeline = time.time() - start_time
                     
-                    # Update stats with processing time
                     self.stats.record(duration, processed_text, total_pipeline)
                     
-                    # Add to UI history
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration)
                     
-                    # Type into focused app
-                    logger.info("Typing", f"{len(processed_text)} chars: {processed_text[:50]}{'...' if len(processed_text) > 50 else ''}")
-                    typing_start = timer.time()
+                    logger.info("Typing", f"{len(processed_text)} chars")
                     VirtualKeyboard.type_text(processed_text)
-                    typing_time = timer.time() - typing_start
                     
-                    # Performance metrics
                     words = len(processed_text.split())
-                    speed_ratio = total_pipeline / duration if duration > 0 else 0
+                    logger.success("Done", f"{total_pipeline:.2f}s | {words} words")
                     
-                    logger.debug("Perf", f"Typing: {typing_time:.2f}s ({len(processed_text)/typing_time:.0f} chars/sec)")
-                    logger.success("Pipeline", f"{total_pipeline:.2f}s total | {speed_ratio:.2f}x realtime | {words} words")
-                    logger.info("Stats", self.stats.summary())
-                    
-                    # Show success briefly
                     if self.ui:
-                        self.ui.set_state("idle", f"✓ {len(processed_text.split())} words")
-                        # Reset to ready after 2 seconds
+                        self.ui.set_state("idle", f"{words} words")
                         threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
                 else:
                     print("[Empty] No speech detected")
+                    if self.ui:
+                        self.ui.set_state("idle", "Ready")
                 
             except Exception as e:
                 print(f"[Error] Transcription failed: {e}")
                 SoundEffects.play_error()
+                if self.ui:
+                    self.ui.set_state("idle", "Ready")
         
         threading.Thread(target=_transcribe, daemon=True).start()
     
     def run(self):
-        """Run the application"""
-        # Start UI
         if self.ui:
             self.ui.start()
             self.ui.set_state("loading")
         
-        # Start system tray
         if self.tray:
             self.tray.run()
         
-        # Load model in background
         self.load_model()
-        
-        # Install keyboard hook
         self.install_hook()
         
         try:
-            # Run message loop (blocks)
             self.message_loop()
         except KeyboardInterrupt:
             print("\n[Exit] Shutting down...")
@@ -1020,9 +803,5 @@ class WhisperTypingApp:
 
 
 def main():
-    app = WhisperTypingApp()
+    app = CognitiveFlowApp()
     app.run()
-
-
-if __name__ == "__main__":
-    main()

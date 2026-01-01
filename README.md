@@ -6,7 +6,7 @@ Press `~` (tilde) to record, speak, press `~` again - text is typed directly int
 
 ## Features
 
-- **GPU Accelerated** - 4x faster than CPU (0.2s transcription for 10s audio)
+- **GPU Accelerated** - 45x faster than CPU (0.2s transcription for 10s audio)
 - **Global Hotkey** - Works in any application (tilde key)
 - **Auto-Type** - Types directly into focused window
 - **Privacy First** - 100% local, no internet required
@@ -33,11 +33,6 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### Option 3: pip install (coming soon)
-```cmd
-pip install cognitive-flow
-```
-
 ## Usage
 
 ```cmd
@@ -45,7 +40,7 @@ cognitive-flow
 ```
 Or:
 ```cmd
-python cognitive_flow.py
+python -m cognitive_flow
 ```
 
 **Controls:**
@@ -55,7 +50,7 @@ python cognitive_flow.py
 
 ## GPU Acceleration
 
-If you have an NVIDIA GPU, install CUDA support for 4x faster transcription:
+If you have an NVIDIA GPU, install CUDA support for 45x faster transcription:
 
 ```cmd
 pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
@@ -72,11 +67,10 @@ The app will automatically use GPU if available, otherwise falls back to CPU.
 
 ## Configuration
 
-Settings are saved in `config.json`:
-- Model size (tiny/base/small/medium/large)
-
-Statistics are saved in `statistics.json`:
-- Total recordings, words, time saved
+Settings and data are stored in `%APPDATA%\CognitiveFlow\`:
+- `config.json` - Model size (tiny/base/small/medium/large)
+- `statistics.json` - Total recordings, words, time saved
+- `history.json` - Recent transcriptions
 
 ## Troubleshooting
 
