@@ -616,25 +616,32 @@ class CognitiveFlowApp:
         
         from .paths import CONFIG_FILE
         self.config_file = CONFIG_FILE
-        self.model_name = self._load_config()
+        self._load_config()
         if self.debug:
             logger.info("Model", f"Loading Whisper model ({self.model_name})...")
     
-    def _load_config(self) -> str:
+    def _load_config(self):
+        # Defaults
+        self.model_name = 'medium'
+        self.add_trailing_space = True  # Add space after each transcription
+        
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
                     config = json.load(f)
-                    return config.get('model_name', 'medium')
+                    self.model_name = config.get('model_name', 'medium')
+                    self.add_trailing_space = config.get('add_trailing_space', True)
             except:
                 pass
-        return 'medium'
     
     def save_config(self):
-        config = {'model_name': self.model_name}
+        config = {
+            'model_name': self.model_name,
+            'add_trailing_space': self.add_trailing_space,
+        }
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
-        print(f"[Config] Saved model preference: {self.model_name}")
+        print(f"[Config] Saved preferences")
     
     def load_model(self):
         self.model_loading = True
@@ -875,7 +882,9 @@ class CognitiveFlowApp:
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration)
                     
-                    VirtualKeyboard.type_text(processed_text)
+                    # Add trailing space if enabled (helps separate consecutive transcriptions)
+                    output_text = processed_text + " " if self.add_trailing_space else processed_text
+                    VirtualKeyboard.type_text(output_text)
                     
                     # Rich logging
                     words = len(processed_text.split())

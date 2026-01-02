@@ -169,6 +169,43 @@ class SettingsDialog(QDialog):
         
         scroll_layout.addLayout(model_layout)
         
+        # Output Options Section
+        scroll_layout.addWidget(self._create_section_header("Output"))
+        output_layout = QVBoxLayout()
+        output_layout.setSpacing(8)
+        
+        self.trailing_space_cb = QCheckBox("Add space after transcription")
+        self.trailing_space_cb.setChecked(
+            self.app_ref.add_trailing_space if self.app_ref and hasattr(self.app_ref, 'add_trailing_space') else True
+        )
+        self.trailing_space_cb.setStyleSheet(f"""
+            QCheckBox {{
+                color: {COLORS['text_primary'].name()};
+                font-size: 12px;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid {COLORS['border_strong'].name()};
+                background-color: {COLORS['bg_elevated'].name()};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {COLORS['idle'].name()};
+                border-color: {COLORS['idle'].name()};
+            }}
+        """)
+        self.trailing_space_cb.toggled.connect(self._on_trailing_space_changed)
+        output_layout.addWidget(self.trailing_space_cb)
+        
+        trailing_space_desc = QLabel("Adds a space after each transcription so consecutive recordings don't run together")
+        trailing_space_desc.setWordWrap(True)
+        trailing_space_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        output_layout.addWidget(trailing_space_desc)
+        
+        scroll_layout.addLayout(output_layout)
+        
         # Statistics Section
         scroll_layout.addWidget(self._create_section_header("Statistics"))
         stats_layout = QVBoxLayout()
@@ -417,6 +454,14 @@ class SettingsDialog(QDialog):
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
                 print(f"[Settings] Model saved. Restart app to use {model_name} model.")
+    
+    def _on_trailing_space_changed(self, checked):
+        """Handle trailing space toggle"""
+        if self.app_ref:
+            self.app_ref.add_trailing_space = checked
+            if hasattr(self.app_ref, 'save_config'):
+                self.app_ref.save_config()
+            print(f"[Settings] Trailing space: {'on' if checked else 'off'}")
     
     def closeEvent(self, event):
         """Fade out on close"""
