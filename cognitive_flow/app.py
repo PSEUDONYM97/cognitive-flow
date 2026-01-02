@@ -316,7 +316,7 @@ class Statistics:
 
 
 class TextProcessor:
-    """Process transcribed text"""
+    """Process transcribed text with correction pass for Whisper artifacts"""
     
     PUNCTUATION = {
         "period": ".", "full stop": ".", "comma": ",", "question mark": "?",
@@ -336,28 +336,64 @@ class TextProcessor:
         "-": "-", "--": "-", "...": "...",
     }
     
+    # Whisper sometimes outputs punctuation directly when it "hears" the word
+    # e.g., "command" becomes ",nd" because Whisper thinks you said "comma" + "nd"
+    # These patterns catch the most common artifacts
+    # Order matters - more specific patterns first
+    WHISPER_CORRECTIONS = [
+        # Punctuation fused with following text
+        # Handles: ",nd", "the,nd", " ,nd" -> "command", "the command", " command"
+        (r",nd\b", " command"),           # ,nd -> command (add space, clean later)
+        (r",nds\b", " commands"),         # ,nds -> commands (plural)
+        (r",nding\b", " commanding"),     # ,nding -> commanding
+        (r",nt\b", " comment"),           # ,nt -> comment  
+        (r",nts\b", " comments"),         # ,nts -> comments
+        (r",n\b", " common"),             # ,n -> common
+        (r",nly\b", " commonly"),         # ,nly -> commonly
+        (r"\.riod\b", " period"),         # .riod -> period
+        (r":lon\b", " colon"),            # :lon -> colon  
+        (r";micolon\b", " semicolon"),    # ;micolon -> semicolon
+        (r"\?estion\b", " question"),     # ?estion -> question
+        (r"!xclamation\b", " exclamation"), # !xclamation -> exclamation
+        
+        # Common Whisper mishearings
+        (r"\bkama\b", "comma"),          # kama -> comma (phonetic mishearing)
+    ]
+    
+    def _correct_whisper_artifacts(self, text: str) -> str:
+        """First pass: fix Whisper's tendency to output literal punctuation"""
+        import re
+        
+        for pattern, replacement in self.WHISPER_CORRECTIONS:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        return text
+    
     def process(self, text: str) -> str:
         if not text:
             return text
         
         import re
         
+        # Pass 1: Fix Whisper artifacts (e.g., ",nd" -> "command")
+        text = self._correct_whisper_artifacts(text)
+        
+        # Pass 2: Normalize fancy characters
         for fancy, simple in self.CHAR_NORMALIZE.items():
             text = text.replace(fancy, simple)
         
+        # Pass 3: Custom word replacements
         for word, replacement in self.REPLACEMENTS.items():
             pattern = re.compile(re.escape(word), re.IGNORECASE)
             text = pattern.sub(replacement, text)
         
-        # Only replace spoken punctuation when it's a standalone word
-        # e.g., "hello comma world" -> "hello, world"
-        # but NOT "command" -> "comand" (partial match)
+        # Pass 4: Convert spoken punctuation to symbols
+        # Only replace when it's a standalone word
         for spoken, punct in self.PUNCTUATION.items():
-            # Match only whole words with word boundaries
             pattern = re.compile(r'\b' + re.escape(spoken) + r'\b', re.IGNORECASE)
             text = pattern.sub(punct, text)
         
-        # Clean up extra spaces around punctuation
+        # Pass 5: Clean up spacing around punctuation
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         text = re.sub(r'\s+', ' ', text)
         
@@ -823,7 +859,13 @@ class CognitiveFlowApp:
                 segment_texts = [seg.text.strip() for seg in segment_list]
                 raw_text = " ".join(segment_texts)
                 
+                if self.debug:
+                    logger.info("Raw", f'Whisper output: "{raw_text}"')
+                
                 processed_text = self.processor.process(raw_text)
+                
+                if self.debug and processed_text != raw_text:
+                    logger.info("Processed", f'After cleanup: "{processed_text}"')
                 
                 if processed_text:
                     total_pipeline = time.time() - start_time
