@@ -846,7 +846,7 @@ class CognitiveFlowApp:
                 
                 segments, info = self.model.transcribe(
                     audio_array,
-                    beam_size=1,
+                    beam_size=5,
                     language="en",
                     vad_filter=False,
                     word_timestamps=False,
