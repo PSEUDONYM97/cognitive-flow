@@ -16,66 +16,85 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .logger import logger
-from .paths import CONFIG_FILE, STATS_FILE
-
-# Add CUDA libraries for GPU support (MUST be before importing faster_whisper)
+# These get set during init_app()
 GPU_AVAILABLE = False
-try:
-    import site
-    user_site = site.USER_SITE
-    if user_site:
-        cuda_path = Path(user_site) / "nvidia"
-        if cuda_path.exists():
-            cudnn_bin = cuda_path / "cudnn" / "bin"
-            cublas_bin = cuda_path / "cublas" / "bin"
-            
-            if cudnn_bin.exists():
-                os.add_dll_directory(str(cudnn_bin))
-            if cublas_bin.exists():
-                os.add_dll_directory(str(cublas_bin))
-            
-            os.environ['PATH'] = f"{cudnn_bin};{cublas_bin};" + os.environ.get('PATH', '')
-            
-            dll_count = 0
-            for dll_dir in [cublas_bin, cudnn_bin]:
-                if dll_dir.exists():
-                    for dll in dll_dir.glob("*.dll"):
-                        try:
-                            ctypes.CDLL(str(dll))
-                            dll_count += 1
-                        except Exception:
-                            pass
-            
-            if dll_count > 0:
-                GPU_AVAILABLE = True
-                print(f"[CUDA] Loaded {dll_count} GPU libraries")
-except Exception as e:
-    print(f"[CUDA] GPU setup failed: {e} - using CPU")
-    GPU_AVAILABLE = False
-
-import pyaudio
-from faster_whisper import WhisperModel
-
-# Optional: pystray for system tray
-try:
-    import pystray
-    from PIL import Image, ImageDraw
-    HAS_TRAY = True
-except ImportError:
-    HAS_TRAY = False
-    print("[Note] Install pystray and pillow for system tray: pip install pystray pillow")
-
-# UI module
+HAS_TRAY = False
 HAS_UI = False
 CognitiveFlowUI = None
+WhisperModel = None
+pyaudio = None
+pystray = None
+Image = None
+ImageDraw = None
+logger = None
 
-try:
-    from .ui import CognitiveFlowUI
-    HAS_UI = True
-    print("[UI] Using PyQt6")
-except ImportError as e:
-    print(f"[Note] No UI module: {e}")
+
+def init_app():
+    """Initialize app - load libraries after banner is shown."""
+    global GPU_AVAILABLE, HAS_TRAY, HAS_UI, CognitiveFlowUI
+    global WhisperModel, pyaudio, pystray, Image, ImageDraw, logger
+    
+    from .logger import logger as _logger
+    from .paths import CONFIG_FILE, STATS_FILE
+    logger = _logger
+    
+    # Add CUDA libraries for GPU support (MUST be before importing faster_whisper)
+    try:
+        import site
+        user_site = site.USER_SITE
+        if user_site:
+            cuda_path = Path(user_site) / "nvidia"
+            if cuda_path.exists():
+                cudnn_bin = cuda_path / "cudnn" / "bin"
+                cublas_bin = cuda_path / "cublas" / "bin"
+                
+                if cudnn_bin.exists():
+                    os.add_dll_directory(str(cudnn_bin))
+                if cublas_bin.exists():
+                    os.add_dll_directory(str(cublas_bin))
+                
+                os.environ['PATH'] = f"{cudnn_bin};{cublas_bin};" + os.environ.get('PATH', '')
+                
+                dll_count = 0
+                for dll_dir in [cublas_bin, cudnn_bin]:
+                    if dll_dir.exists():
+                        for dll in dll_dir.glob("*.dll"):
+                            try:
+                                ctypes.CDLL(str(dll))
+                                dll_count += 1
+                            except Exception:
+                                pass
+                
+                if dll_count > 0:
+                    GPU_AVAILABLE = True
+                    print(f"[CUDA] Loaded {dll_count} GPU libraries")
+    except Exception as e:
+        print(f"[CUDA] GPU setup failed: {e} - using CPU")
+    
+    import pyaudio as _pyaudio
+    from faster_whisper import WhisperModel as _WhisperModel
+    pyaudio = _pyaudio
+    WhisperModel = _WhisperModel
+    
+    # Optional: pystray for system tray
+    try:
+        import pystray as _pystray
+        from PIL import Image as _Image, ImageDraw as _ImageDraw
+        pystray = _pystray
+        Image = _Image
+        ImageDraw = _ImageDraw
+        HAS_TRAY = True
+    except ImportError:
+        print("[Note] Install pystray and pillow for system tray: pip install pystray pillow")
+    
+    # UI module
+    try:
+        from .ui import CognitiveFlowUI as _CognitiveFlowUI
+        CognitiveFlowUI = _CognitiveFlowUI
+        HAS_UI = True
+        print("[UI] Using PyQt6")
+    except ImportError as e:
+        print(f"[Note] No UI module: {e}")
 
 # Windows API constants
 WH_KEYBOARD_LL = 13
@@ -159,6 +178,7 @@ class Statistics:
     """Track usage statistics"""
     
     def __init__(self, stats_file: str | None = None):
+        from .paths import STATS_FILE
         self.stats_file = Path(stats_file) if stats_file else STATS_FILE
         self.stats: dict = self._load_stats()
     
@@ -320,19 +340,26 @@ class TextProcessor:
         if not text:
             return text
         
+        import re
+        
         for fancy, simple in self.CHAR_NORMALIZE.items():
             text = text.replace(fancy, simple)
         
         for word, replacement in self.REPLACEMENTS.items():
-            import re
             pattern = re.compile(re.escape(word), re.IGNORECASE)
             text = pattern.sub(replacement, text)
         
+        # Only replace spoken punctuation when it's a standalone word
+        # e.g., "hello comma world" -> "hello, world"
+        # but NOT "command" -> "comand" (partial match)
         for spoken, punct in self.PUNCTUATION.items():
-            text = text.replace(f" {spoken}", punct)
-            text = text.replace(f"{spoken} ", f"{punct} ")
-            if text.lower().endswith(spoken):
-                text = text[:-len(spoken)] + punct
+            # Match only whole words with word boundaries
+            pattern = re.compile(r'\b' + re.escape(spoken) + r'\b', re.IGNORECASE)
+            text = pattern.sub(punct, text)
+        
+        # Clean up extra spaces around punctuation
+        text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+        text = re.sub(r'\s+', ' ', text)
         
         return text.strip()
 
@@ -442,10 +469,31 @@ class SystemTray:
 
 
 class VirtualKeyboard:
+    # Characters that can break terminals or trigger unwanted behavior
+    DANGEROUS_CHARS = {
+        '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07',  # Control chars
+        '\x08', '\x0b', '\x0c', '\x0e', '\x0f', '\x10', '\x11', '\x12',
+        '\x13', '\x14', '\x15', '\x16', '\x17', '\x18', '\x19', '\x1a',
+        '\x1b', '\x1c', '\x1d', '\x1e', '\x1f',  # Escape and more control
+        '\x7f',  # DEL
+        '`',  # Backtick - can trigger terminal escapes
+    }
+    
+    @staticmethod
+    def sanitize_text(text: str) -> str:
+        """Remove or replace characters that can break terminals."""
+        # Replace backticks with single quotes
+        text = text.replace('`', "'")
+        # Remove control characters
+        return ''.join(c for c in text if c not in VirtualKeyboard.DANGEROUS_CHARS)
+    
     @staticmethod
     def type_text(text: str):
         if not text:
             return
+        
+        # Sanitize before typing
+        text = VirtualKeyboard.sanitize_text(text)
         
         BATCH_SIZE = 100
         BATCH_DELAY = 0
@@ -487,7 +535,8 @@ class VirtualKeyboard:
 class CognitiveFlowApp:
     """Main application"""
     
-    def __init__(self):
+    def __init__(self, debug: bool = False):
+        self.debug = debug
         self.is_recording = False
         self.frames: list[bytes] = []
         self.record_start_time: float = 0.0
@@ -505,6 +554,10 @@ class CognitiveFlowApp:
         self.model_loading = False
         self.using_gpu = False
         
+        # For retry functionality
+        self.last_audio = None
+        self.last_duration = 0.0
+        
         self.tray: SystemTray | None = None
         if HAS_TRAY:
             self.tray = SystemTray(self)
@@ -517,17 +570,19 @@ class CognitiveFlowApp:
         self.hook_proc = None
         self.running = True
         
-        logger.header("Cognitive Flow - Local Voice-to-Text")
-        logger.info("Stats", self.stats.summary())
-        logger.separator()
-        logger.info("Controls", "~ (tilde) - Start/stop recording")
-        logger.info("Controls", "Tray > Quit - Exit application")
-        logger.info("Controls", "Right-click - Open settings")
-        logger.separator()
+        if self.debug:
+            logger.info("Stats", self.stats.summary())
+            logger.separator()
+            logger.info("Controls", "~ (tilde) - Start/stop recording")
+            logger.info("Controls", "Tray > Quit - Exit application")
+            logger.info("Controls", "Right-click - Open settings")
+            logger.separator()
         
+        from .paths import CONFIG_FILE
         self.config_file = CONFIG_FILE
         self.model_name = self._load_config()
-        logger.info("Model", f"Loading Whisper model ({self.model_name})...")
+        if self.debug:
+            logger.info("Model", f"Loading Whisper model ({self.model_name})...")
     
     def _load_config(self) -> str:
         if self.config_file.exists():
@@ -551,7 +606,8 @@ class CognitiveFlowApp:
         def _load():
             try:
                 if GPU_AVAILABLE:
-                    print(f"[GPU] Loading {self.model_name} model on CUDA...")
+                    if self.debug:
+                        print(f"[GPU] Loading {self.model_name} model on CUDA...")
                     try:
                         self.model = WhisperModel(
                             self.model_name,
@@ -560,10 +616,12 @@ class CognitiveFlowApp:
                             device_index=0
                         )
                         self.using_gpu = True
-                        print(f"[GPU] Model loaded successfully!")
+                        if self.debug:
+                            print(f"[GPU] Model loaded successfully!")
                         
                         # Warmup
-                        print("[GPU] Warming up model...")
+                        if self.debug:
+                            print("[GPU] Warming up model...")
                         import numpy as np
                         warmup_audio = tempfile.mktemp(suffix=".wav")
                         samples = np.zeros(16000, dtype=np.int16)
@@ -576,9 +634,10 @@ class CognitiveFlowApp:
                         wf.close()
                         list(self.model.transcribe(warmup_audio, beam_size=1, language="en"))
                         os.unlink(warmup_audio)
-                        print("[GPU] Warmup complete")
+                        if self.debug:
+                            print("[GPU] Warmup complete")
+                            print(f"[Ready] Model: {self.model_name} (GPU)")
                         
-                        print(f"[Ready] Model: {self.model_name} (GPU)")
                         if self.tray:
                             self.tray.update_icon(recording=False, loading=False)
                             self.tray.icon.title = "Cognitive Flow - Ready (GPU)"
@@ -586,9 +645,11 @@ class CognitiveFlowApp:
                             self.ui.set_state("idle", "Ready (GPU)")
                         return
                     except Exception as gpu_err:
-                        print(f"[GPU] Failed: {gpu_err}")
+                        if self.debug:
+                            print(f"[GPU] Failed: {gpu_err}")
                 
-                print(f"[CPU] Loading {self.model_name} model...")
+                if self.debug:
+                    print(f"[CPU] Loading {self.model_name} model...")
                 self.model = WhisperModel(
                     self.model_name,
                     device="cpu",
@@ -597,7 +658,8 @@ class CognitiveFlowApp:
                     num_workers=1
                 )
                 self.using_gpu = False
-                print(f"[Ready] Model: {self.model_name} (CPU)")
+                if self.debug:
+                    print(f"[Ready] Model: {self.model_name} (CPU)")
                 if self.tray:
                     self.tray.update_icon(recording=False, loading=False)
                     self.tray.icon.title = "Cognitive Flow - Ready (CPU)"
@@ -677,7 +739,8 @@ class CognitiveFlowApp:
         self.record_start_time = time.time()
         
         SoundEffects.play_start()
-        logger.info("Record", "Listening...")
+        if self.debug:
+            logger.info("Record", "Listening...")
         
         if self.tray:
             self.tray.update_icon(recording=True)
@@ -712,7 +775,8 @@ class CognitiveFlowApp:
         duration = time.time() - self.record_start_time
         
         SoundEffects.play_stop()
-        logger.info("Processing", f"{duration:.1f}s of audio...")
+        if self.debug:
+            logger.info("Processing", f"{duration:.1f}s of audio...")
         
         if self.tray:
             self.tray.update_icon(recording=False)
@@ -726,6 +790,20 @@ class CognitiveFlowApp:
                 
                 audio_data = b''.join(self.frames)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                
+                # Store for retry
+                self.last_audio = audio_array
+                self.last_duration = duration
+                
+                # Check for audio issues
+                max_amp = np.max(np.abs(audio_array))
+                if max_amp < 0.01:
+                    logger.warning("Audio", "No audio detected - check microphone")
+                    SoundEffects.play_error()
+                    if self.ui:
+                        self.ui.set_state("idle", "No audio!")
+                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                    return
                 
                 if self.model is None:
                     raise RuntimeError("Model not loaded")
@@ -755,17 +833,28 @@ class CognitiveFlowApp:
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration)
                     
-                    logger.info("Typing", f"{len(processed_text)} chars")
                     VirtualKeyboard.type_text(processed_text)
                     
+                    # Rich logging
                     words = len(processed_text.split())
-                    logger.success("Done", f"{total_pipeline:.2f}s | {words} words")
+                    chars = len(processed_text)
+                    speed_ratio = duration / total_pipeline if total_pipeline > 0 else 0
+                    preview = processed_text[:60] + "..." if len(processed_text) > 60 else processed_text
+                    preview = preview.replace('\n', ' ')  # Single line preview
+                    
+                    if self.debug:
+                        # Verbose debug output
+                        logger.success("Done", f"{words} words, {chars} chars in {total_pipeline:.2f}s ({speed_ratio:.1f}x realtime)")
+                        logger.info("Text", f'"{preview}"')
+                    else:
+                        # Concise but useful
+                        logger.success("Typed", f'{words}w/{chars}c in {total_pipeline:.1f}s | "{preview}"')
                     
                     if self.ui:
                         self.ui.set_state("idle", f"{words} words")
                         threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
                 else:
-                    print("[Empty] No speech detected")
+                    logger.warning("Audio", "No speech detected")
                     if self.ui:
                         self.ui.set_state("idle", "Ready")
                 
@@ -805,8 +894,45 @@ class CognitiveFlowApp:
 
 def main():
     import signal
+    import argparse
+    import subprocess
+    from . import __version__
     
-    app = CognitiveFlowApp()
+    parser = argparse.ArgumentParser(description="Cognitive Flow - Local voice-to-text")
+    parser.add_argument("--debug", action="store_true", help="Run in foreground with debug output")
+    parser.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)  # Internal flag
+    args = parser.parse_args()
+    
+    # If not debug and not already in foreground, respawn detached and exit
+    if not args.debug and not args.foreground:
+        # Spawn detached process with pythonw (no console)
+        subprocess.Popen(
+            ["pythonw", "-m", "cognitive_flow", "--foreground"],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+            close_fds=True
+        )
+        print("Cognitive Flow started in background")
+        return
+    
+    # Debug mode: show banner
+    if args.debug:
+        print("=" * 60)
+        print(f"  Cognitive Flow v{__version__}")
+        print("=" * 60)
+        print()
+        print("  CHANGELOG:")
+        print("    v1.1.0 - GUI mode by default, --debug for console")
+        print("           - Fixed audio capture race condition") 
+        print("           - Clean Ctrl+C and tray exit")
+        print("    v1.0.0 - Initial release as proper package")
+        print("           - Config/stats stored in %APPDATA%\\CognitiveFlow")
+        print()
+        print("=" * 60)
+    
+    # Now load all the heavy libraries
+    init_app()
+    
+    app = CognitiveFlowApp(debug=args.debug)
     
     def handle_sigint(sig, frame):
         print("\n[Exit] Ctrl+C received...")

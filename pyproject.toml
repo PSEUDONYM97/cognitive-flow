@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cognitive-flow"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local voice-to-text with GPU acceleration - free WhisperTyping alternative"
 readme = "README.md"
 license = {text = "MIT"}

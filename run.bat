@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-python -m cognitive_flow
+start "" pythonw -m cognitive_flow
