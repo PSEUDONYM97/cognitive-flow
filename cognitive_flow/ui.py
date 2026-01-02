@@ -747,9 +747,14 @@ class CognitiveFlowUI(QObject):
     show_settings_signal = pyqtSignal()
     
     def __init__(self, app):
+        # Create QApplication FIRST before calling super().__init__()
+        # This ensures QObject is created in the correct thread context
+        self.qt_app = QApplication.instance()
+        if self.qt_app is None:
+            self.qt_app = QApplication(sys.argv)
+        
         super().__init__()
         self.app = app
-        self.qt_app = None
         self.indicator = None
         self.history = TranscriptionHistory()
         self.settings_dialog = None
@@ -759,10 +764,6 @@ class CognitiveFlowUI(QObject):
     
     def start(self):
         """Start Qt application"""
-        self.qt_app = QApplication.instance()
-        if self.qt_app is None:
-            self.qt_app = QApplication(sys.argv)
-        
         self.indicator = FloatingIndicator(
             on_click=self.app.toggle_recording if hasattr(self.app, 'toggle_recording') else None,
             get_last_transcription=self.get_last_transcription,

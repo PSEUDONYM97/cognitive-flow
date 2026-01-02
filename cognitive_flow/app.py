@@ -708,6 +708,7 @@ class CognitiveFlowApp:
     
     def stop_recording(self):
         self.is_recording = False
+        time.sleep(0.1)  # Give recording thread time to finish last read
         duration = time.time() - self.record_start_time
         
         SoundEffects.play_stop()
@@ -803,5 +804,27 @@ class CognitiveFlowApp:
 
 
 def main():
+    import signal
+    
     app = CognitiveFlowApp()
+    
+    def handle_sigint(sig, frame):
+        print("\n[Exit] Ctrl+C received...")
+        app.running = False
+        if app.hook:
+            UnhookWindowsHookEx(app.hook)
+            app.hook = None
+        if app.tray and app.tray.icon:
+            try:
+                app.tray.icon.stop()
+            except:
+                pass
+        if app.ui:
+            app.ui.destroy()
+        app.audio.terminate()
+        print("[Goodbye]")
+        os._exit(0)
+    
+    signal.signal(signal.SIGINT, handle_sigint)
+    
     app.run()
