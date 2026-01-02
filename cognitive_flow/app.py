@@ -72,9 +72,12 @@ def init_app():
         print(f"[CUDA] GPU setup failed: {e} - using CPU")
     
     import pyaudio as _pyaudio
-    from faster_whisper import WhisperModel as _WhisperModel
     pyaudio = _pyaudio
+    
+    print("[Model] Loading Whisper engine...", end=" ", flush=True)
+    from faster_whisper import WhisperModel as _WhisperModel
     WhisperModel = _WhisperModel
+    print("done")
     
     # Optional: pystray for system tray
     try:
