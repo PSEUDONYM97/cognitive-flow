@@ -516,15 +516,39 @@ class VirtualKeyboard:
         '\x1b', '\x1c', '\x1d', '\x1e', '\x1f',  # Escape and more control
         '\x7f',  # DEL
         '`',  # Backtick - can trigger terminal escapes
+        '\u200b',  # Zero-width space
+        '\u200c',  # Zero-width non-joiner
+        '\u200d',  # Zero-width joiner
+        '\ufeff',  # BOM / zero-width no-break space
+        '\u00ad',  # Soft hyphen
+        '\u2028',  # Line separator
+        '\u2029',  # Paragraph separator
+    }
+    
+    # Characters to replace with safe equivalents
+    CHAR_REPLACEMENTS = {
+        '`': "'",           # Backtick -> single quote
+        '\u00a0': ' ',      # Non-breaking space -> regular space
+        '\u2018': "'",      # Left single quote
+        '\u2019': "'",      # Right single quote  
+        '\u201c': '"',      # Left double quote
+        '\u201d': '"',      # Right double quote
+        '\u2013': '-',      # En dash
+        '\u2014': '-',      # Em dash
+        '\u2026': '...',    # Ellipsis
     }
     
     @staticmethod
     def sanitize_text(text: str) -> str:
         """Remove or replace characters that can break terminals."""
-        # Replace backticks with single quotes
-        text = text.replace('`', "'")
-        # Remove control characters
-        return ''.join(c for c in text if c not in VirtualKeyboard.DANGEROUS_CHARS)
+        # First, apply replacements
+        for bad, good in VirtualKeyboard.CHAR_REPLACEMENTS.items():
+            text = text.replace(bad, good)
+        # Then remove dangerous chars
+        text = ''.join(c for c in text if c not in VirtualKeyboard.DANGEROUS_CHARS)
+        # Finally, ensure only printable ASCII + common extended chars
+        # Keep: printable ASCII (32-126), newline, tab, and basic extended Latin
+        return ''.join(c for c in text if (32 <= ord(c) <= 126) or c in '\n\t' or (192 <= ord(c) <= 255))
     
     @staticmethod
     def type_text(text: str):
@@ -645,6 +669,51 @@ class CognitiveFlowApp:
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
         print(f"[Config] Saved preferences")
+    
+    def _log_transcription(self, raw_text: str, processed_text: str):
+        """Log transcription details to file for debugging terminal breaks."""
+        from .paths import DEBUG_LOG_FILE
+        from datetime import datetime
+        
+        def char_dump(s: str) -> str:
+            """Create hex dump of characters."""
+            return ' '.join(f'{ord(c):02x}' for c in s)
+        
+        def flag_suspicious(s: str) -> list:
+            """Flag any non-standard ASCII characters."""
+            suspicious = []
+            for i, c in enumerate(s):
+                code = ord(c)
+                if code < 32 and c not in '\n\t':
+                    suspicious.append(f"  pos {i}: CONTROL char {code:02x}")
+                elif code > 126 and code < 192:
+                    suspicious.append(f"  pos {i}: EXTENDED char {code:02x} '{c}'")
+                elif code > 255:
+                    suspicious.append(f"  pos {i}: UNICODE {code:04x} '{c}'")
+            return suspicious
+        
+        try:
+            with open(DEBUG_LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"Time: {datetime.now().isoformat()}\n")
+                f.write(f"Raw text ({len(raw_text)} chars):\n")
+                f.write(f"  {raw_text!r}\n")
+                f.write(f"Processed text ({len(processed_text)} chars):\n")
+                f.write(f"  {processed_text!r}\n")
+                
+                suspicious = flag_suspicious(raw_text)
+                if suspicious:
+                    f.write(f"SUSPICIOUS CHARS IN RAW:\n")
+                    f.write('\n'.join(suspicious) + '\n')
+                
+                suspicious = flag_suspicious(processed_text)
+                if suspicious:
+                    f.write(f"SUSPICIOUS CHARS IN PROCESSED:\n")
+                    f.write('\n'.join(suspicious) + '\n')
+                    
+        except Exception as e:
+            if self.debug:
+                print(f"[Debug] Failed to log transcription: {e}")
     
     def load_model(self):
         self.model_loading = True
@@ -877,6 +946,9 @@ class CognitiveFlowApp:
                 if self.debug and processed_text != raw_text:
                     logger.info("Processed", f'After cleanup: "{processed_text}"')
                 
+                # Log to file for debugging terminal breaks
+                self._log_transcription(raw_text, processed_text)
+                
                 if processed_text:
                     total_pipeline = time.time() - start_time
                     
@@ -975,11 +1047,13 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.2.0 - Debug logging for terminal break investigation")
+        print("           - Logs to %APPDATA%\\CognitiveFlow\\debug_transcriptions.log")
+        print("           - Enhanced character sanitization")
+        print("           - beam_size=5 for better accuracy")
         print("    v1.1.0 - GUI mode by default, --debug for console")
         print("           - Fixed audio capture race condition") 
-        print("           - Clean Ctrl+C and tray exit")
         print("    v1.0.0 - Initial release as proper package")
-        print("           - Config/stats stored in %APPDATA%\\CognitiveFlow")
         print()
         print("=" * 60)
     

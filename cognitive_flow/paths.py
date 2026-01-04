@@ -29,3 +29,4 @@ APP_DATA_DIR = get_app_data_dir()
 CONFIG_FILE = APP_DATA_DIR / "config.json"
 STATS_FILE = APP_DATA_DIR / "statistics.json"
 HISTORY_FILE = APP_DATA_DIR / "history.json"
+DEBUG_LOG_FILE = APP_DATA_DIR / "debug_transcriptions.log"
