@@ -582,8 +582,8 @@ class VirtualKeyboard:
         # Sanitize before typing
         text = VirtualKeyboard.sanitize_text(text)
         
-        BATCH_SIZE = 100
-        BATCH_DELAY = 0
+        BATCH_SIZE = 50  # Smaller batches
+        BATCH_DELAY = 0.01  # 10ms between batches
         
         for i in range(0, len(text), BATCH_SIZE):
             batch = text[i:i + BATCH_SIZE]
@@ -1074,6 +1074,7 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.3.1 - Slower typing (50 char batches, 10ms delay)")
         print("    v1.3.0 - Microphone input device selector in Settings")
         print("    v1.2.1 - Comprehensive timing + debug logging")
         print("           - Logs to %APPDATA%\\CognitiveFlow\\debug_transcriptions.log")
