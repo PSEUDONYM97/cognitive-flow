@@ -576,32 +576,24 @@ class VirtualKeyboard:
     
     @staticmethod
     def type_text(text: str):
+        """Type text using SendInput - all characters in one call."""
         if not text:
             return
         
         # Sanitize before typing
         text = VirtualKeyboard.sanitize_text(text)
         
-        BATCH_SIZE = 50  # Smaller batches
-        BATCH_DELAY = 0.01  # 10ms between batches
-        
-        for i in range(0, len(text), BATCH_SIZE):
-            batch = text[i:i + BATCH_SIZE]
-            VirtualKeyboard._type_batch(batch)
-            if i + BATCH_SIZE < len(text):
-                time.sleep(BATCH_DELAY)
-    
-    @staticmethod
-    def _type_batch(text: str):
         num_chars = len(text)
         if num_chars == 0:
             return
         
+        # Build array of INPUT structs - keydown + keyup for each char
         inputs = (INPUT * (num_chars * 2))()
         
         for i, char in enumerate(text):
             idx = i * 2
             
+            # Key down
             inputs[idx].type = INPUT_KEYBOARD
             inputs[idx].union.ki.wVk = 0
             inputs[idx].union.ki.wScan = ord(char)
@@ -609,6 +601,7 @@ class VirtualKeyboard:
             inputs[idx].union.ki.time = 0
             inputs[idx].union.ki.dwExtraInfo = None
             
+            # Key up
             inputs[idx + 1].type = INPUT_KEYBOARD
             inputs[idx + 1].union.ki.wVk = 0
             inputs[idx + 1].union.ki.wScan = ord(char)
@@ -616,6 +609,7 @@ class VirtualKeyboard:
             inputs[idx + 1].union.ki.time = 0
             inputs[idx + 1].union.ki.dwExtraInfo = None
         
+        # Send all at once
         SendInput(num_chars * 2, inputs, ctypes.sizeof(INPUT))
 
 
@@ -1074,7 +1068,7 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
-        print("    v1.3.1 - Slower typing (50 char batches, 10ms delay)")
+        print("    v1.3.2 - Single SendInput call for all chars (no batching)")
         print("    v1.3.0 - Microphone input device selector in Settings")
         print("    v1.2.1 - Comprehensive timing + debug logging")
         print("           - Logs to %APPDATA%\\CognitiveFlow\\debug_transcriptions.log")
