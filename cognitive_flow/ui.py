@@ -143,6 +143,41 @@ class SettingsDialog(QDialog):
         scroll_layout.setSpacing(40)
         scroll_layout.setContentsMargins(0, 8, 16, 8)
         
+        # Input Device Selection
+        scroll_layout.addWidget(self._create_section_header("Microphone"))
+        input_layout = QVBoxLayout()
+        input_layout.setSpacing(8)
+        
+        self.input_combo = QComboBox()
+        self.input_combo.setObjectName("settingsCombo")
+        self.input_combo.setFixedHeight(36)
+        
+        # Populate with available input devices
+        self._input_devices = []  # Store (index, name) tuples
+        if self.app_ref and hasattr(self.app_ref, 'get_input_devices'):
+            self._input_devices = self.app_ref.get_input_devices()
+            self.input_combo.addItem("System Default", None)
+            for idx, name in self._input_devices:
+                self.input_combo.addItem(name, idx)
+            
+            # Set current selection
+            current_idx = getattr(self.app_ref, 'input_device_index', None)
+            if current_idx is not None:
+                for i in range(self.input_combo.count()):
+                    if self.input_combo.itemData(i) == current_idx:
+                        self.input_combo.setCurrentIndex(i)
+                        break
+        
+        self.input_combo.currentIndexChanged.connect(self._on_input_device_changed)
+        input_layout.addWidget(self.input_combo)
+        
+        input_desc = QLabel("Select which microphone to use for recording")
+        input_desc.setWordWrap(True)
+        input_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        input_layout.addWidget(input_desc)
+        
+        scroll_layout.addLayout(input_layout)
+        
         # Model Selection
         scroll_layout.addWidget(self._create_section_header("Transcription Model"))
         model_layout = QVBoxLayout()
@@ -462,6 +497,16 @@ class SettingsDialog(QDialog):
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
             print(f"[Settings] Trailing space: {'on' if checked else 'off'}")
+    
+    def _on_input_device_changed(self, index):
+        """Handle input device selection change"""
+        if self.app_ref:
+            device_idx = self.input_combo.itemData(index)
+            device_name = self.input_combo.currentText()
+            self.app_ref.input_device_index = device_idx
+            if hasattr(self.app_ref, 'save_config'):
+                self.app_ref.save_config()
+            print(f"[Settings] Input device: {device_name}")
     
     def closeEvent(self, event):
         """Fade out on close"""

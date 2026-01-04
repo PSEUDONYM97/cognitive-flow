@@ -634,6 +634,7 @@ class CognitiveFlowApp:
         self.CHANNELS = 1
         self.RATE = 16000
         self.audio = pyaudio.PyAudio()
+        self.input_device_index = None  # None = system default
         
         self.stats = Statistics()
         self.processor = TextProcessor()
@@ -675,6 +676,7 @@ class CognitiveFlowApp:
         # Defaults
         self.model_name = 'medium'
         self.add_trailing_space = True  # Add space after each transcription
+        self.input_device_index = None  # None = system default
         
         if self.config_file.exists():
             try:
@@ -682,6 +684,7 @@ class CognitiveFlowApp:
                     config = json.load(f)
                     self.model_name = config.get('model_name', 'medium')
                     self.add_trailing_space = config.get('add_trailing_space', True)
+                    self.input_device_index = config.get('input_device_index', None)
             except:
                 pass
     
@@ -689,10 +692,21 @@ class CognitiveFlowApp:
         config = {
             'model_name': self.model_name,
             'add_trailing_space': self.add_trailing_space,
+            'input_device_index': self.input_device_index,
         }
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
         print(f"[Config] Saved preferences")
+    
+    def get_input_devices(self) -> list[tuple[int, str]]:
+        """Get list of available input devices as (index, name) tuples."""
+        devices = []
+        for i in range(self.audio.get_device_count()):
+            info = self.audio.get_device_info_by_index(i)
+            if info.get('maxInputChannels', 0) > 0:
+                name = info.get('name', f'Device {i}')
+                devices.append((i, name))
+        return devices
     
 
     
@@ -849,13 +863,18 @@ class CognitiveFlowApp:
             self.ui.set_state("recording", "Recording...")
         
         def _record():
-            stream = self.audio.open(
-                format=self.FORMAT,
-                channels=self.CHANNELS,
-                rate=self.RATE,
-                input=True,
-                frames_per_buffer=self.CHUNK
-            )
+            # Use selected input device or system default
+            stream_kwargs = {
+                'format': self.FORMAT,
+                'channels': self.CHANNELS,
+                'rate': self.RATE,
+                'input': True,
+                'frames_per_buffer': self.CHUNK,
+            }
+            if self.input_device_index is not None:
+                stream_kwargs['input_device_index'] = self.input_device_index
+            
+            stream = self.audio.open(**stream_kwargs)
             
             while self.is_recording:
                 try:
