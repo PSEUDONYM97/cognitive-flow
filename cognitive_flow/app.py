@@ -29,16 +29,25 @@ ImageDraw = None
 logger = None
 
 
-def init_app():
+def init_app(debug=False):
     """Initialize app - load libraries after banner is shown."""
     global GPU_AVAILABLE, HAS_TRAY, HAS_UI, CognitiveFlowUI
     global WhisperModel, pyaudio, pystray, Image, ImageDraw, logger
     
+    import time
+    _t = time.perf_counter
+    _timings = {}
+    
     from .logger import logger as _logger
-    from .paths import CONFIG_FILE, STATS_FILE
     logger = _logger
     
+    # In debug mode, enable file logging
+    if debug:
+        from .paths import DEBUG_LOG_FILE
+        logger.set_log_file(DEBUG_LOG_FILE)
+    
     # Add CUDA libraries for GPU support (MUST be before importing faster_whisper)
+    _start = _t()
     try:
         import site
         user_site = site.USER_SITE
@@ -70,16 +79,22 @@ def init_app():
                     print(f"[CUDA] Loaded {dll_count} GPU libraries")
     except Exception as e:
         print(f"[CUDA] GPU setup failed: {e} - using CPU")
+    _timings['cuda_setup'] = (_t() - _start) * 1000
     
+    _start = _t()
     import pyaudio as _pyaudio
     pyaudio = _pyaudio
+    _timings['pyaudio_import'] = (_t() - _start) * 1000
     
+    _start = _t()
     print("[Model] Loading Whisper engine...", end=" ", flush=True)
     from faster_whisper import WhisperModel as _WhisperModel
     WhisperModel = _WhisperModel
     print("done")
+    _timings['whisper_import'] = (_t() - _start) * 1000
     
     # Optional: pystray for system tray
+    _start = _t()
     try:
         import pystray as _pystray
         from PIL import Image as _Image, ImageDraw as _ImageDraw
@@ -89,8 +104,10 @@ def init_app():
         HAS_TRAY = True
     except ImportError:
         print("[Note] Install pystray and pillow for system tray: pip install pystray pillow")
+    _timings['pystray_import'] = (_t() - _start) * 1000
     
     # UI module
+    _start = _t()
     try:
         from .ui import CognitiveFlowUI as _CognitiveFlowUI
         CognitiveFlowUI = _CognitiveFlowUI
@@ -98,6 +115,13 @@ def init_app():
         print("[UI] Using PyQt6")
     except ImportError as e:
         print(f"[Note] No UI module: {e}")
+    _timings['ui_import'] = (_t() - _start) * 1000
+    
+    # Log timings in debug mode
+    if debug:
+        logger.info("Init", "Library load times:")
+        for name, ms in _timings.items():
+            logger.timing("Init", name, ms)
 
 # Windows API constants
 WH_KEYBOARD_LL = 13
@@ -670,60 +694,19 @@ class CognitiveFlowApp:
             json.dump(config, f, indent=2)
         print(f"[Config] Saved preferences")
     
-    def _log_transcription(self, raw_text: str, processed_text: str):
-        """Log transcription details to file for debugging terminal breaks."""
-        from .paths import DEBUG_LOG_FILE
-        from datetime import datetime
-        
-        def char_dump(s: str) -> str:
-            """Create hex dump of characters."""
-            return ' '.join(f'{ord(c):02x}' for c in s)
-        
-        def flag_suspicious(s: str) -> list:
-            """Flag any non-standard ASCII characters."""
-            suspicious = []
-            for i, c in enumerate(s):
-                code = ord(c)
-                if code < 32 and c not in '\n\t':
-                    suspicious.append(f"  pos {i}: CONTROL char {code:02x}")
-                elif code > 126 and code < 192:
-                    suspicious.append(f"  pos {i}: EXTENDED char {code:02x} '{c}'")
-                elif code > 255:
-                    suspicious.append(f"  pos {i}: UNICODE {code:04x} '{c}'")
-            return suspicious
-        
-        try:
-            with open(DEBUG_LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*60}\n")
-                f.write(f"Time: {datetime.now().isoformat()}\n")
-                f.write(f"Raw text ({len(raw_text)} chars):\n")
-                f.write(f"  {raw_text!r}\n")
-                f.write(f"Processed text ({len(processed_text)} chars):\n")
-                f.write(f"  {processed_text!r}\n")
-                
-                suspicious = flag_suspicious(raw_text)
-                if suspicious:
-                    f.write(f"SUSPICIOUS CHARS IN RAW:\n")
-                    f.write('\n'.join(suspicious) + '\n')
-                
-                suspicious = flag_suspicious(processed_text)
-                if suspicious:
-                    f.write(f"SUSPICIOUS CHARS IN PROCESSED:\n")
-                    f.write('\n'.join(suspicious) + '\n')
-                    
-        except Exception as e:
-            if self.debug:
-                print(f"[Debug] Failed to log transcription: {e}")
+
     
     def load_model(self):
         self.model_loading = True
         
         def _load():
+            _t = time.perf_counter
             try:
                 if GPU_AVAILABLE:
                     if self.debug:
-                        print(f"[GPU] Loading {self.model_name} model on CUDA...")
+                        logger.info("GPU", f"Loading {self.model_name} model on CUDA...")
                     try:
+                        _start = _t()
                         self.model = WhisperModel(
                             self.model_name,
                             device="cuda",
@@ -732,11 +715,12 @@ class CognitiveFlowApp:
                         )
                         self.using_gpu = True
                         if self.debug:
-                            print(f"[GPU] Model loaded successfully!")
+                            logger.timing("GPU", "model_load", (_t() - _start) * 1000)
                         
                         # Warmup
                         if self.debug:
-                            print("[GPU] Warming up model...")
+                            logger.info("GPU", "Warming up model...")
+                        _start = _t()
                         import numpy as np
                         warmup_audio = tempfile.mktemp(suffix=".wav")
                         samples = np.zeros(16000, dtype=np.int16)
@@ -750,8 +734,8 @@ class CognitiveFlowApp:
                         list(self.model.transcribe(warmup_audio, beam_size=1, language="en"))
                         os.unlink(warmup_audio)
                         if self.debug:
-                            print("[GPU] Warmup complete")
-                            print(f"[Ready] Model: {self.model_name} (GPU)")
+                            logger.timing("GPU", "warmup", (_t() - _start) * 1000)
+                            logger.success("Ready", f"Model: {self.model_name} (GPU)")
                         
                         if self.tray:
                             self.tray.update_icon(recording=False, loading=False)
@@ -761,10 +745,11 @@ class CognitiveFlowApp:
                         return
                     except Exception as gpu_err:
                         if self.debug:
-                            print(f"[GPU] Failed: {gpu_err}")
+                            logger.error("GPU", f"Failed: {gpu_err}")
                 
                 if self.debug:
-                    print(f"[CPU] Loading {self.model_name} model...")
+                    logger.info("CPU", f"Loading {self.model_name} model...")
+                _start = _t()
                 self.model = WhisperModel(
                     self.model_name,
                     device="cpu",
@@ -774,7 +759,8 @@ class CognitiveFlowApp:
                 )
                 self.using_gpu = False
                 if self.debug:
-                    print(f"[Ready] Model: {self.model_name} (CPU)")
+                    logger.timing("CPU", "model_load", (_t() - _start) * 1000)
+                    logger.success("Ready", f"Model: {self.model_name} (CPU)")
                 if self.tray:
                     self.tray.update_icon(recording=False, loading=False)
                     self.tray.icon.title = "Cognitive Flow - Ready (CPU)"
@@ -901,10 +887,14 @@ class CognitiveFlowApp:
         def _transcribe():
             try:
                 import numpy as np
-                start_time = time.time()
+                _t = time.perf_counter
+                _timings = {}
+                pipeline_start = _t()
                 
+                _start = _t()
                 audio_data = b''.join(self.frames)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                _timings['audio_convert'] = (_t() - _start) * 1000
                 
                 # Store for retry
                 self.last_audio = audio_array
@@ -912,6 +902,11 @@ class CognitiveFlowApp:
                 
                 # Check for audio issues
                 max_amp = np.max(np.abs(audio_array))
+                num_samples = len(audio_array)
+                
+                if self.debug:
+                    logger.info("Audio", f"samples={num_samples} max_amp={max_amp:.4f} duration={duration:.2f}s")
+                
                 if max_amp < 0.01:
                     logger.warning("Audio", "No audio detected - check microphone")
                     SoundEffects.play_error()
@@ -923,6 +918,7 @@ class CognitiveFlowApp:
                 if self.model is None:
                     raise RuntimeError("Model not loaded")
                 
+                _start = _t()
                 segments, info = self.model.transcribe(
                     audio_array,
                     beam_size=5,
@@ -935,42 +931,54 @@ class CognitiveFlowApp:
                 )
                 
                 segment_list = list(segments)
+                _timings['whisper_transcribe'] = (_t() - _start) * 1000
+                
+                _start = _t()
                 segment_texts = [seg.text.strip() for seg in segment_list]
                 raw_text = " ".join(segment_texts)
+                _timings['segment_join'] = (_t() - _start) * 1000
                 
                 if self.debug:
                     logger.info("Raw", f'Whisper output: "{raw_text}"')
+                    logger.info("Segments", f"count={len(segment_list)}")
                 
+                _start = _t()
                 processed_text = self.processor.process(raw_text)
+                _timings['text_process'] = (_t() - _start) * 1000
                 
                 if self.debug and processed_text != raw_text:
                     logger.info("Processed", f'After cleanup: "{processed_text}"')
                 
-                # Log to file for debugging terminal breaks
-                self._log_transcription(raw_text, processed_text)
-                
                 if processed_text:
-                    total_pipeline = time.time() - start_time
+                    _start = _t()
+                    # Add trailing space if enabled (helps separate consecutive transcriptions)
+                    output_text = processed_text + " " if self.add_trailing_space else processed_text
+                    VirtualKeyboard.type_text(output_text)
+                    _timings['typing'] = (_t() - _start) * 1000
                     
-                    self.stats.record(duration, processed_text, total_pipeline)
+                    total_pipeline = (_t() - pipeline_start) * 1000  # ms
+                    _timings['total'] = total_pipeline
+                    
+                    self.stats.record(duration, processed_text, total_pipeline / 1000)
                     
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration)
                     
-                    # Add trailing space if enabled (helps separate consecutive transcriptions)
-                    output_text = processed_text + " " if self.add_trailing_space else processed_text
-                    VirtualKeyboard.type_text(output_text)
+                    # Log to file for debugging terminal breaks (debug mode only)
+                    if self.debug:
+                        logger.log_transcription(raw_text, processed_text, duration, _timings)
                     
                     # Rich logging
                     words = len(processed_text.split())
                     chars = len(processed_text)
-                    speed_ratio = duration / total_pipeline if total_pipeline > 0 else 0
                     preview = processed_text[:60] + "..." if len(processed_text) > 60 else processed_text
                     preview = preview.replace('\n', ' ')  # Single line preview
                     
                     if self.debug:
-                        # Verbose debug output
-                        logger.success("Done", f"{words} words, {chars} chars in {total_pipeline:.2f}s ({speed_ratio:.1f}x realtime)")
+                        # Verbose debug output with timings
+                        logger.success("Done", f"{words} words, {chars} chars")
+                        for name, ms in _timings.items():
+                            logger.timing("Pipeline", name, ms)
                         logger.info("Text", f'"{preview}"')
                     else:
                         # Concise but useful
@@ -1047,18 +1055,18 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
-        print("    v1.2.0 - Debug logging for terminal break investigation")
+        print("    v1.2.1 - Comprehensive timing + debug logging")
         print("           - Logs to %APPDATA%\\CognitiveFlow\\debug_transcriptions.log")
-        print("           - Enhanced character sanitization")
-        print("           - beam_size=5 for better accuracy")
+        print("           - Times: imports, model load, transcription pipeline")
+        print("           - Flags suspicious characters in output")
+        print("    v1.2.0 - Enhanced character sanitization, beam_size=5")
         print("    v1.1.0 - GUI mode by default, --debug for console")
-        print("           - Fixed audio capture race condition") 
         print("    v1.0.0 - Initial release as proper package")
         print()
         print("=" * 60)
     
     # Now load all the heavy libraries
-    init_app()
+    init_app(debug=args.debug)
     
     app = CognitiveFlowApp(debug=args.debug)
     

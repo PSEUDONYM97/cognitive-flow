@@ -1,23 +1,17 @@
 """
 Color-coded logging for Cognitive Flow
-Clean, readable debug output
+Clean, readable debug output with optional timing
 """
 
 import sys
+import time
 from datetime import datetime
-from enum import Enum
-
-
-class LogLevel(Enum):
-    DEBUG = "DEBUG"
-    INFO = "INFO"
-    SUCCESS = "SUCCESS"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
+from pathlib import Path
+from contextlib import contextmanager
 
 
 class ColoredLogger:
-    """Windows-compatible colored logging"""
+    """Windows-compatible colored logging with timing support"""
     
     # ANSI color codes
     COLORS = {
@@ -26,23 +20,15 @@ class ColoredLogger:
         'SUCCESS': '\033[32m',   # Green
         'WARNING': '\033[33m',   # Yellow
         'ERROR': '\033[31m',     # Red
+        'TIMING': '\033[35m',    # Magenta
         'RESET': '\033[0m',
-        'BOLD': '\033[1m',
         'DIM': '\033[2m'
     }
     
-    # Emoji/symbols for each level
-    SYMBOLS = {
-        'DEBUG': '',
-        'INFO': '',
-        'SUCCESS': '',
-        'WARNING': '',
-        'ERROR': ''
-    }
-    
-    def __init__(self, use_colors=True, use_symbols=False):
+    def __init__(self, use_colors=True):
         self.use_colors = use_colors and self._supports_color()
-        self.use_symbols = use_symbols
+        self._session_start = time.perf_counter()
+        self._log_file = None
         
         # Enable ANSI colors on Windows
         if sys.platform == 'win32' and self.use_colors:
@@ -53,56 +39,105 @@ class ColoredLogger:
             except:
                 self.use_colors = False
     
+    def set_log_file(self, path: Path):
+        """Enable file logging."""
+        self._log_file = path
+        self._write_file(f"\n{'='*60}")
+        self._write_file(f"SESSION: {datetime.now().isoformat()}")
+        self._write_file(f"{'='*60}")
+    
     def _supports_color(self):
-        """Check if terminal supports colors"""
         return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
     
-    def _format_message(self, level: str, category: str, message: str) -> str:
-        """Format log message with colors and structure"""
+    def _elapsed_ms(self) -> float:
+        return (time.perf_counter() - self._session_start) * 1000
+    
+    def _format(self, level: str, category: str, message: str) -> str:
         timestamp = datetime.now().strftime("%H:%M:%S")
         
         if self.use_colors:
             color = self.COLORS.get(level, self.COLORS['RESET'])
             reset = self.COLORS['RESET']
             dim = self.COLORS['DIM']
-            
-            # Structured format: [TIME] [CATEGORY] Message
             return f"{dim}[{timestamp}]{reset} {color}[{category}]{reset} {message}"
         else:
-            # Plain format
-            symbol = self.SYMBOLS.get(level, '') if self.use_symbols else ''
-            return f"[{timestamp}] [{category}] {symbol}{message}"
+            return f"[{timestamp}] [{category}] {message}"
+    
+    def _write_file(self, msg: str):
+        if self._log_file:
+            try:
+                # Strip ANSI codes
+                clean = msg
+                for code in self.COLORS.values():
+                    clean = clean.replace(code, '')
+                with open(self._log_file, 'a', encoding='utf-8') as f:
+                    f.write(clean + '\n')
+            except:
+                pass
+    
+    def _log(self, level: str, category: str, message: str):
+        formatted = self._format(level, category, message)
+        print(formatted)
+        self._write_file(formatted)
     
     def debug(self, category: str, message: str):
-        """Debug level - development info"""
-        print(self._format_message('DEBUG', category, message))
+        self._log('DEBUG', category, message)
     
     def info(self, category: str, message: str):
-        """Info level - general information"""
-        print(self._format_message('INFO', category, message))
+        self._log('INFO', category, message)
     
     def success(self, category: str, message: str):
-        """Success level - completed actions"""
-        print(self._format_message('SUCCESS', category, message))
+        self._log('SUCCESS', category, message)
     
     def warning(self, category: str, message: str):
-        """Warning level - potential issues"""
-        print(self._format_message('WARNING', category, message))
+        self._log('WARNING', category, message)
     
     def error(self, category: str, message: str):
-        """Error level - failures"""
-        print(self._format_message('ERROR', category, message))
+        self._log('ERROR', category, message)
+    
+    def timing(self, category: str, name: str, ms: float):
+        self._log('TIMING', category, f"{name}: {ms:.1f}ms")
     
     def separator(self, char='=', length=60):
-        """Print a separator line"""
-        print(char * length)
+        line = char * length
+        print(line)
+        self._write_file(line)
     
-    def header(self, text: str):
-        """Print a formatted header"""
-        self.separator()
-        print(f"  {text}")
-        self.separator()
+    @contextmanager
+    def timer(self, category: str, name: str):
+        """Context manager for timing a block."""
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            ms = (time.perf_counter() - start) * 1000
+            self.timing(category, name, ms)
+    
+    def log_transcription(self, raw: str, processed: str, audio_sec: float, timings: dict = None):
+        """Log transcription details to file only."""
+        if not self._log_file:
+            return
+        
+        self._write_file(f"\n{'-'*40}")
+        self._write_file(f"TRANSCRIPTION @ {datetime.now().strftime('%H:%M:%S')}")
+        self._write_file(f"audio: {audio_sec:.2f}s")
+        
+        if timings:
+            for k, v in timings.items():
+                self._write_file(f"  {k}: {v:.1f}ms")
+        
+        self._write_file(f"raw ({len(raw)}): {raw!r}")
+        self._write_file(f"out ({len(processed)}): {processed!r}")
+        
+        # Flag suspicious
+        for i, c in enumerate(raw):
+            code = ord(c)
+            if code < 32 and c not in '\n\t':
+                self._write_file(f"  SUSPECT pos {i}: 0x{code:02X} control")
+            elif code > 126:
+                self._write_file(f"  SUSPECT pos {i}: U+{code:04X} '{c}'")
+        self._write_file(f"{'-'*40}")
 
 
-# Global logger instance
-logger = ColoredLogger(use_colors=True, use_symbols=False)
+# Global instance
+logger = ColoredLogger()
