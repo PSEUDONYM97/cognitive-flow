@@ -512,12 +512,27 @@ class SystemTray:
             stats = self.app.stats.summary()
             ctypes.windll.user32.MessageBoxW(None, stats, "Cognitive Flow Stats", 0x40)
     
+    def on_toggle_overlay(self, icon, item):
+        self.app.show_overlay = not self.app.show_overlay
+        self.app.save_config()
+        if self.app.ui:
+            if self.app.show_overlay:
+                self.app.ui.show()
+            else:
+                self.app.ui.hide()
+        print(f"[Settings] Overlay: {'visible' if self.app.show_overlay else 'hidden'}")
+    
     def run(self):
         if not HAS_TRAY:
             return
         
         menu = pystray.Menu(
             pystray.MenuItem("Settings", self.on_show_stats),
+            pystray.MenuItem(
+                "Show Overlay",
+                self.on_toggle_overlay,
+                checked=lambda item: self.app.show_overlay if self.app else True
+            ),
             pystray.MenuItem("Quit", self.on_quit)
         )
         
@@ -678,6 +693,7 @@ class CognitiveFlowApp:
         self.model_name = 'medium'
         self.add_trailing_space = True  # Add space after each transcription
         self.input_device_index = None  # None = system default
+        self.show_overlay = True  # Show floating indicator
         
         if self.config_file.exists():
             try:
@@ -686,6 +702,7 @@ class CognitiveFlowApp:
                     self.model_name = config.get('model_name', 'medium')
                     self.add_trailing_space = config.get('add_trailing_space', True)
                     self.input_device_index = config.get('input_device_index', None)
+                    self.show_overlay = config.get('show_overlay', True)
             except:
                 pass
     
@@ -694,6 +711,7 @@ class CognitiveFlowApp:
             'model_name': self.model_name,
             'add_trailing_space': self.add_trailing_space,
             'input_device_index': self.input_device_index,
+            'show_overlay': self.show_overlay,
         }
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -1023,7 +1041,10 @@ class CognitiveFlowApp:
     def run(self):
         if self.ui:
             self.ui.start()
-            self.ui.set_state("loading")
+            if self.show_overlay:
+                self.ui.set_state("loading")
+            else:
+                self.ui.hide()
         
         if self.tray:
             self.tray.run()
@@ -1075,8 +1096,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.4.0 - Show Overlay toggle in system tray menu")
         print("    v1.3.3 - WM_CHAR direct posting (bypass keyboard queue)")
-        print("    v1.3.2 - Single SendInput call for all chars (no batching)")
         print("    v1.3.0 - Microphone input device selector in Settings")
         print("    v1.2.1 - Comprehensive timing + debug logging")
         print("           - Logs to %APPDATA%\\CognitiveFlow\\debug_transcriptions.log")

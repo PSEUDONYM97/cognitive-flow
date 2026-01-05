@@ -883,6 +883,16 @@ class CognitiveFlowUI(QObject):
         """Add to history"""
         self.history.add(text, duration)
     
+    def show(self):
+        """Show the overlay indicator"""
+        if self.indicator:
+            self.indicator.show()
+    
+    def hide(self):
+        """Hide the overlay indicator"""
+        if self.indicator:
+            self.indicator.hide()
+    
     def show_settings(self):
         """Show settings dialog - thread safe"""
         self.show_settings_signal.emit()
