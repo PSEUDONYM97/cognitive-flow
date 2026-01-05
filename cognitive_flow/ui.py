@@ -521,7 +521,11 @@ class SettingsDialog(QDialog):
 
 
 class FloatingIndicator(QWidget):
-    """Floating indicator widget"""
+    """Floating indicator widget - collapses to dot when idle"""
+    
+    EXPANDED_WIDTH = 180
+    COLLAPSED_WIDTH = 44  # Just enough for the dot with padding
+    COLLAPSE_DELAY_MS = 3000  # 3 seconds
     
     def __init__(self, on_click=None, get_last_transcription=None, show_settings=None):
         super().__init__()
@@ -533,6 +537,8 @@ class FloatingIndicator(QWidget):
         self.state = "loading"
         self.status_text = "Loading..."
         self._is_hovered = False
+        self._is_collapsed = False
+        self._current_width = self.EXPANDED_WIDTH
         
         # Animatable properties
         self._circle_color = QColor(COLORS["processing"])
@@ -548,16 +554,25 @@ class FloatingIndicator(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         
-        self.setFixedSize(180, 40)
+        self.setFixedSize(self.EXPANDED_WIDTH, 40)
         
-        # Position
+        # Position - store screen info for repositioning
         screen = QGuiApplication.primaryScreen()
-        screen_geometry = screen.availableGeometry()
-        margin = 24
-        x = screen_geometry.x() + screen_geometry.width() - self.width() - margin
-        y = screen_geometry.y() + screen_geometry.height() - self.height() - margin
-        self.move(x, y)
-        print(f"[UI] Window positioned at ({x}, {y})")
+        self._screen_geometry = screen.availableGeometry()
+        self._margin = 24
+        self._base_y = self._screen_geometry.y() + self._screen_geometry.height() - self.height() - self._margin
+        self._update_position()
+        print(f"[UI] Window positioned at ({self.x()}, {self.y()})")
+        
+        # Collapse timer
+        self._collapse_timer = QTimer(self)
+        self._collapse_timer.setSingleShot(True)
+        self._collapse_timer.timeout.connect(self._collapse)
+        
+        # Width animation
+        self._width_animation = QPropertyAnimation(self, b"indicator_width")
+        self._width_animation.setDuration(250)
+        self._width_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         
         # Layout
         layout = QHBoxLayout()
@@ -618,6 +633,53 @@ class FloatingIndicator(QWidget):
         self.status_label.setStyleSheet(f"color: {color.name()};")
     
     text_color = pyqtProperty(QColor, get_text_color, set_text_color)
+    
+    def get_indicator_width(self):
+        return self._current_width
+    
+    def set_indicator_width(self, value):
+        self._current_width = int(value)
+        self.setFixedWidth(self._current_width)
+        self._update_position()
+        # Hide text when collapsed
+        if self._current_width < self.EXPANDED_WIDTH * 0.6:
+            self.status_label.hide()
+        else:
+            self.status_label.show()
+        self.update()
+    
+    indicator_width = pyqtProperty(int, get_indicator_width, set_indicator_width)
+    
+    def _update_position(self):
+        """Keep indicator anchored to bottom-right"""
+        x = self._screen_geometry.x() + self._screen_geometry.width() - self._current_width - self._margin
+        self.move(x, self._base_y)
+    
+    def _collapse(self):
+        """Animate to collapsed state"""
+        if self._is_collapsed or self.state != "idle":
+            return
+        self._is_collapsed = True
+        self._width_animation.stop()
+        self._width_animation.setStartValue(self._current_width)
+        self._width_animation.setEndValue(self.COLLAPSED_WIDTH)
+        self._width_animation.start()
+    
+    def _expand(self):
+        """Animate to expanded state"""
+        if not self._is_collapsed:
+            return
+        self._is_collapsed = False
+        self._collapse_timer.stop()
+        self._width_animation.stop()
+        self._width_animation.setStartValue(self._current_width)
+        self._width_animation.setEndValue(self.EXPANDED_WIDTH)
+        self._width_animation.start()
+    
+    def _start_collapse_timer(self):
+        """Start timer to collapse after delay"""
+        self._collapse_timer.stop()
+        self._collapse_timer.start(self.COLLAPSE_DELAY_MS)
     
     def get_hover_opacity(self):
         return self._hover_opacity
@@ -748,6 +810,15 @@ class FloatingIndicator(QWidget):
         self.text_color_animation.setEndValue(text_color)
         self.text_color_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.text_color_animation.start()
+        
+        # Collapse/expand behavior
+        if state in ("recording", "processing", "loading"):
+            # Expand immediately when active
+            self._collapse_timer.stop()
+            self._expand()
+        elif state == "idle":
+            # Start collapse timer when idle
+            self._start_collapse_timer()
     
     def show_context_menu(self, position):
         """Context menu"""
@@ -800,6 +871,9 @@ class FloatingIndicator(QWidget):
         self.hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.hover_animation.start()
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        # Expand on hover if collapsed
+        if self._is_collapsed:
+            self._expand()
     
     def leaveEvent(self, event):
         self._is_hovered = False
@@ -810,6 +884,9 @@ class FloatingIndicator(QWidget):
         self.hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.hover_animation.start()
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        # Restart collapse timer when leaving (if idle)
+        if self.state == "idle":
+            self._start_collapse_timer()
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -887,6 +964,7 @@ class CognitiveFlowUI(QObject):
         """Show the overlay indicator"""
         if self.indicator:
             self.indicator.show()
+            self.indicator.update()  # Force repaint to show current state
     
     def hide(self):
         """Hide the overlay indicator"""
