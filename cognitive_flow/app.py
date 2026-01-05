@@ -576,41 +576,48 @@ class VirtualKeyboard:
     
     @staticmethod
     def type_text(text: str):
-        """Type text using SendInput - all characters in one call."""
+        """Type text by posting WM_CHAR messages directly to the focused control.
+        
+        This bypasses the keyboard input queue and sends characters directly,
+        which should be faster and more reliable for long strings.
+        """
         if not text:
             return
         
         # Sanitize before typing
         text = VirtualKeyboard.sanitize_text(text)
         
-        num_chars = len(text)
-        if num_chars == 0:
+        if not text:
             return
         
-        # Build array of INPUT structs - keydown + keyup for each char
-        inputs = (INPUT * (num_chars * 2))()
+        WM_CHAR = 0x0102
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
         
-        for i, char in enumerate(text):
-            idx = i * 2
-            
-            # Key down
-            inputs[idx].type = INPUT_KEYBOARD
-            inputs[idx].union.ki.wVk = 0
-            inputs[idx].union.ki.wScan = ord(char)
-            inputs[idx].union.ki.dwFlags = KEYEVENTF_UNICODE
-            inputs[idx].union.ki.time = 0
-            inputs[idx].union.ki.dwExtraInfo = None
-            
-            # Key up
-            inputs[idx + 1].type = INPUT_KEYBOARD
-            inputs[idx + 1].union.ki.wVk = 0
-            inputs[idx + 1].union.ki.wScan = ord(char)
-            inputs[idx + 1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-            inputs[idx + 1].union.ki.time = 0
-            inputs[idx + 1].union.ki.dwExtraInfo = None
+        # Get the foreground window
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return
         
-        # Send all at once
-        SendInput(num_chars * 2, inputs, ctypes.sizeof(INPUT))
+        # Get the focused control (requires thread attachment)
+        current_thread = kernel32.GetCurrentThreadId()
+        fg_thread = user32.GetWindowThreadProcessId(hwnd, None)
+        
+        # Attach to the foreground thread to get focus
+        attached = False
+        if current_thread != fg_thread:
+            attached = user32.AttachThreadInput(current_thread, fg_thread, True)
+        
+        focus = user32.GetFocus()
+        target = focus if focus else hwnd
+        
+        # Post WM_CHAR for each character
+        for char in text:
+            user32.PostMessageW(target, WM_CHAR, ord(char), 0)
+        
+        # Detach from thread
+        if attached:
+            user32.AttachThreadInput(current_thread, fg_thread, False)
 
 
 class CognitiveFlowApp:
@@ -1068,6 +1075,7 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.3.3 - WM_CHAR direct posting (bypass keyboard queue)")
         print("    v1.3.2 - Single SendInput call for all chars (no batching)")
         print("    v1.3.0 - Microphone input device selector in Settings")
         print("    v1.2.1 - Comprehensive timing + debug logging")
