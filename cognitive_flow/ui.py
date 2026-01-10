@@ -180,31 +180,53 @@ class SettingsDialog(QDialog):
         input_layout.addWidget(input_desc)
         
         scroll_layout.addLayout(input_layout)
-        
+
+        # Backend Selection
+        scroll_layout.addWidget(self._create_section_header("Transcription Engine"))
+        backend_layout = QVBoxLayout()
+        backend_layout.setSpacing(8)
+
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem("Whisper (OpenAI)", "whisper")
+        self.backend_combo.addItem("Parakeet (NVIDIA) - Faster", "parakeet")
+        self.backend_combo.setObjectName("settingsCombo")
+        self.backend_combo.setFixedHeight(36)
+
+        # Set current backend
+        current_backend = getattr(self.app_ref, 'backend_type', 'whisper') if self.app_ref else 'whisper'
+        for i in range(self.backend_combo.count()):
+            if self.backend_combo.itemData(i) == current_backend:
+                self.backend_combo.setCurrentIndex(i)
+                break
+
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        backend_layout.addWidget(self.backend_combo)
+
+        self.backend_desc = QLabel("Whisper is well-tested. Parakeet is ~50x faster with better accuracy.")
+        self.backend_desc.setWordWrap(True)
+        self.backend_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        backend_layout.addWidget(self.backend_desc)
+
+        scroll_layout.addLayout(backend_layout)
+
         # Model Selection
-        scroll_layout.addWidget(self._create_section_header("Transcription Model"))
+        scroll_layout.addWidget(self._create_section_header("Model"))
         model_layout = QVBoxLayout()
         model_layout.setSpacing(8)
-        
+
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
-        
-        # Set current model from app
-        if self.app_ref and hasattr(self.app_ref, 'model_name'):
-            self.model_combo.setCurrentText(self.app_ref.model_name)
-        else:
-            self.model_combo.setCurrentText("medium")
-        
         self.model_combo.setObjectName("settingsCombo")
         self.model_combo.setFixedHeight(36)
+        self._populate_model_combo()  # Populate based on current backend
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         model_layout.addWidget(self.model_combo)
-        
-        self.model_desc = QLabel("Medium provides the best balance of speed and accuracy")
+
+        self.model_desc = QLabel("")
         self.model_desc.setWordWrap(True)
         self.model_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        self._update_model_description()
         model_layout.addWidget(self.model_desc)
-        
+
         scroll_layout.addLayout(model_layout)
         
         # Output Options Section
@@ -481,40 +503,125 @@ class SettingsDialog(QDialog):
         clipboard.setText(text)
         print(f"[Clipboard] Copied: {text[:50]}{'...' if len(text) > 50 else ''}")
     
+    def _get_current_backend(self) -> str:
+        """Get current backend type from app or combo."""
+        if self.app_ref and hasattr(self.app_ref, 'backend_type'):
+            return self.app_ref.backend_type
+        return self.backend_combo.currentData() or 'whisper'
+
+    def _populate_model_combo(self):
+        """Populate model combo based on current backend."""
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+
+        backend = self._get_current_backend()
+
+        if backend == 'parakeet':
+            self.model_combo.addItems([
+                "nemo-parakeet-tdt-0.6b-v2",
+                "nemo-parakeet-tdt-0.6b-v3",
+                "nemo-parakeet-tdt-0.6b-v3-int8",
+            ])
+            current = getattr(self.app_ref, 'parakeet_model', 'nemo-parakeet-tdt-0.6b-v2') if self.app_ref else 'nemo-parakeet-tdt-0.6b-v2'
+        else:
+            self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
+            current = getattr(self.app_ref, 'model_name', 'medium') if self.app_ref else 'medium'
+
+        # Set current selection
+        idx = self.model_combo.findText(current)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+
+        self.model_combo.blockSignals(False)
+
+    def _update_model_description(self):
+        """Update model description based on current selection."""
+        backend = self._get_current_backend()
+        model = self.model_combo.currentText()
+
+        if backend == 'parakeet':
+            descriptions = {
+                "nemo-parakeet-tdt-0.6b-v2": "English only, fastest, ~2GB VRAM",
+                "nemo-parakeet-tdt-0.6b-v3": "25 European languages, slightly larger",
+                "nemo-parakeet-tdt-0.6b-v3-int8": "Quantized v3, smaller & faster",
+            }
+        else:
+            descriptions = {
+                "tiny": "Fastest but least accurate - good for testing",
+                "base": "Fast with reasonable accuracy",
+                "small": "Good balance for most users",
+                "medium": "Best balance of speed and accuracy (recommended)",
+                "large": "Most accurate but slower - requires more RAM"
+            }
+
+        self.model_desc.setText(descriptions.get(model, ""))
+
+    def _on_backend_changed(self, index):
+        """Handle backend selection change."""
+        if not self.app_ref:
+            return
+
+        backend = self.backend_combo.itemData(index)
+        if backend == self.app_ref.backend_type:
+            return
+
+        # Skip if already loading
+        if hasattr(self.app_ref, 'model_loading') and self.app_ref.model_loading:
+            print(f"[Settings] Model already loading - ignoring backend change")
+            self.backend_combo.blockSignals(True)
+            for i in range(self.backend_combo.count()):
+                if self.backend_combo.itemData(i) == self.app_ref.backend_type:
+                    self.backend_combo.setCurrentIndex(i)
+                    break
+            self.backend_combo.blockSignals(False)
+            return
+
+        self.app_ref.backend_type = backend
+        if hasattr(self.app_ref, 'save_config'):
+            self.app_ref.save_config()
+
+        # Update model combo for new backend
+        self._populate_model_combo()
+        self._update_model_description()
+
+        # Reload model with new backend
+        if hasattr(self.app_ref, 'load_model'):
+            model = self.model_combo.currentText()
+            print(f"[Settings] Switching to {backend} ({model})...")
+            self.app_ref.load_model()
+
     def _on_model_changed(self, model_name):
         """Handle model selection change - reloads model live"""
-        descriptions = {
-            "tiny": "Fastest but least accurate - good for testing",
-            "base": "Fast with reasonable accuracy",
-            "small": "Good balance for most users",
-            "medium": "Best balance of speed and accuracy (recommended)",
-            "large": "Most accurate but slower - requires more RAM"
-        }
+        self._update_model_description()
 
-        self.model_desc.setText(descriptions.get(model_name, ""))
+        if not self.app_ref:
+            return
 
-        if self.app_ref:
-            # Skip if same model
+        backend = self._get_current_backend()
+
+        # Determine which config property to update
+        if backend == 'parakeet':
+            if hasattr(self.app_ref, 'parakeet_model') and self.app_ref.parakeet_model == model_name:
+                return
+            self.app_ref.parakeet_model = model_name
+        else:
             if hasattr(self.app_ref, 'model_name') and self.app_ref.model_name == model_name:
                 return
-
-            # Skip if already loading a model (prevents OOM from rapid clicking)
-            if hasattr(self.app_ref, 'model_loading') and self.app_ref.model_loading:
-                print(f"[Settings] Model already loading - ignoring {model_name}")
-                # Reset combo to current model
-                self.model_combo.blockSignals(True)
-                self.model_combo.setCurrentText(self.app_ref.model_name)
-                self.model_combo.blockSignals(False)
-                return
-
             self.app_ref.model_name = model_name
-            if hasattr(self.app_ref, 'save_config'):
-                self.app_ref.save_config()
 
-            # Reload model in background
-            if hasattr(self.app_ref, 'load_model'):
-                print(f"[Settings] Loading {model_name} model...")
-                self.app_ref.load_model()
+        # Skip if already loading a model (prevents OOM from rapid clicking)
+        if hasattr(self.app_ref, 'model_loading') and self.app_ref.model_loading:
+            print(f"[Settings] Model already loading - ignoring {model_name}")
+            self._populate_model_combo()  # Reset to current
+            return
+
+        if hasattr(self.app_ref, 'save_config'):
+            self.app_ref.save_config()
+
+        # Reload model in background
+        if hasattr(self.app_ref, 'load_model'):
+            print(f"[Settings] Loading {model_name}...")
+            self.app_ref.load_model()
     
     def _on_trailing_space_changed(self, checked):
         """Handle trailing space toggle"""

@@ -1,8 +1,9 @@
 # Cognitive Flow - Dependencies
 # Install with: pip install -r requirements.txt
 
-# Core transcription
-faster-whisper>=1.0.0
+# Core transcription (choose one or both)
+faster-whisper>=1.0.0          # Whisper backend (default)
+onnx-asr[gpu,hub]>=0.10.0      # Parakeet backend (faster, more accurate)
 
 # Audio recording
 PyAudio>=0.2.14

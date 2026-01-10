@@ -757,7 +757,8 @@ class CognitiveFlowApp:
         
         self.stats = Statistics()
         self.processor = TextProcessor()
-        self.model: WhisperModel | None = None
+        self.backend = None  # TranscriptionBackend instance
+        self.model = None    # Legacy compatibility (points to backend)
         self.model_loading = False
         self.using_gpu = False
         
@@ -790,21 +791,26 @@ class CognitiveFlowApp:
         self.config_file = CONFIG_FILE
         self._load_config()
         if self.debug:
-            logger.info("Model", f"Loading Whisper model ({self.model_name})...")
+            model = self.parakeet_model if self.backend_type == 'parakeet' else self.model_name
+            logger.info("Model", f"Loading {self.backend_type} model ({model})...")
     
     def _load_config(self):
         # Defaults
-        self.model_name = 'medium'
+        self.backend_type = 'whisper'  # 'whisper' or 'parakeet'
+        self.model_name = 'medium'     # Whisper: tiny/base/small/medium/large
+        self.parakeet_model = 'nemo-parakeet-tdt-0.6b-v2'  # Parakeet model
         self.add_trailing_space = True  # Add space after each transcription
         self.input_device_index = None  # None = system default
         self.show_overlay = True  # Show floating indicator
         self.archive_audio = True  # Save audio recordings for future training
-        
+
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
                     config = json.load(f)
+                    self.backend_type = config.get('backend_type', 'whisper')
                     self.model_name = config.get('model_name', 'medium')
+                    self.parakeet_model = config.get('parakeet_model', 'nemo-parakeet-tdt-0.6b-v2')
                     self.add_trailing_space = config.get('add_trailing_space', True)
                     self.input_device_index = config.get('input_device_index', None)
                     self.show_overlay = config.get('show_overlay', True)
@@ -814,7 +820,9 @@ class CognitiveFlowApp:
     
     def save_config(self):
         config = {
+            'backend_type': self.backend_type,
             'model_name': self.model_name,
+            'parakeet_model': self.parakeet_model,
             'add_trailing_space': self.add_trailing_space,
             'input_device_index': self.input_device_index,
             'show_overlay': self.show_overlay,
@@ -838,86 +846,98 @@ class CognitiveFlowApp:
     
     def load_model(self):
         self.model_loading = True
-        
+
         def _load():
+            from .backends import get_backend, WhisperBackend, ParakeetBackend
             _t = time.perf_counter
+
             try:
-                if GPU_AVAILABLE:
-                    if self.debug:
-                        logger.info("GPU", f"Loading {self.model_name} model on CUDA...")
-                    try:
-                        _start = _t()
-                        self.model = WhisperModel(
-                            self.model_name,
-                            device="cuda",
-                            compute_type="float32",
-                            device_index=0
-                        )
-                        self.using_gpu = True
-                        if self.debug:
-                            logger.timing("GPU", "model_load", (_t() - _start) * 1000)
-                        
-                        # Warmup
-                        if self.debug:
-                            logger.info("GPU", "Warming up model...")
-                        _start = _t()
-                        import numpy as np
-                        warmup_audio = tempfile.mktemp(suffix=".wav")
-                        samples = np.zeros(16000, dtype=np.int16)
-                        import wave as wav_module
-                        wf = wav_module.open(warmup_audio, 'wb')
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(16000)
-                        wf.writeframes(samples.tobytes())
-                        wf.close()
-                        list(self.model.transcribe(warmup_audio, beam_size=1, language="en"))
-                        os.unlink(warmup_audio)
-                        if self.debug:
-                            logger.timing("GPU", "warmup", (_t() - _start) * 1000)
-                            logger.success("Ready", f"Model: {self.model_name} (GPU)")
-                        
-                        if self.tray:
-                            self.tray.update_icon(recording=False, loading=False)
-                            self.tray.icon.title = "Cognitive Flow - Ready (GPU)"
-                        if self.ui:
-                            self.ui.set_state("idle", "Ready (GPU)")
-                        return
-                    except Exception as gpu_err:
-                        if self.debug:
-                            logger.error("GPU", f"Failed: {gpu_err}")
-                
+                # Determine model name based on backend
+                if self.backend_type == 'parakeet':
+                    model_name = self.parakeet_model
+                    backend_class = ParakeetBackend
+                else:
+                    model_name = self.model_name
+                    backend_class = WhisperBackend
+
                 if self.debug:
-                    logger.info("CPU", f"Loading {self.model_name} model...")
+                    logger.info("Model", f"Loading {self.backend_type}: {model_name}...")
+
+                # Create backend instance
+                self.backend = backend_class()
+
+                # Try GPU first
                 _start = _t()
-                self.model = WhisperModel(
-                    self.model_name,
-                    device="cpu",
-                    compute_type="int8",
-                    cpu_threads=4,
-                    num_workers=1
-                )
-                self.using_gpu = False
+                use_gpu = GPU_AVAILABLE
+
+                if use_gpu:
+                    if self.debug:
+                        logger.info("GPU", f"Loading {model_name} on CUDA...")
+
+                success = self.backend.load(model_name, use_gpu=use_gpu)
+
+                if not success:
+                    raise RuntimeError(f"Failed to load {model_name}")
+
+                self.using_gpu = self.backend.using_gpu
+                self.model = self.backend  # Legacy compatibility
+
+                load_time = (_t() - _start) * 1000
+                device = "GPU" if self.using_gpu else "CPU"
+
                 if self.debug:
-                    logger.timing("CPU", "model_load", (_t() - _start) * 1000)
-                    logger.success("Ready", f"Model: {self.model_name} (CPU)")
+                    logger.timing(device, "model_load", load_time)
+
+                # Warmup for Whisper (Parakeet doesn't need it)
+                if isinstance(self.backend, WhisperBackend) and self.using_gpu:
+                    if self.debug:
+                        logger.info("GPU", "Warming up model...")
+                    _start = _t()
+                    import numpy as np
+                    warmup_audio = tempfile.mktemp(suffix=".wav")
+                    samples = np.zeros(16000, dtype=np.int16)
+                    import wave as wav_module
+                    wf = wav_module.open(warmup_audio, 'wb')
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(samples.tobytes())
+                    wf.close()
+                    list(self.backend._model.transcribe(warmup_audio, beam_size=1, language="en"))
+                    os.unlink(warmup_audio)
+                    if self.debug:
+                        logger.timing("GPU", "warmup", (_t() - _start) * 1000)
+
+                # Update status
+                status = f"Ready ({device})"
+                if self.debug:
+                    logger.success("Ready", f"Model: {model_name} ({device})")
+
                 if self.tray:
                     self.tray.update_icon(recording=False, loading=False)
-                    self.tray.icon.title = "Cognitive Flow - Ready (CPU)"
+                    self.tray.icon.title = f"Cognitive Flow - {status}"
                 if self.ui:
-                    self.ui.set_state("idle", "Ready (CPU)")
-                    
+                    self.ui.set_state("idle", status)
+
             except Exception as e:
                 print(f"[Error] Failed to load: {e}")
+                # Fallback to Whisper base on CPU
                 try:
-                    self.model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=4)
+                    from .backends import WhisperBackend
+                    self.backend = WhisperBackend()
+                    self.backend.load("base", use_gpu=False)
+                    self.model = self.backend
                     self.model_name = "base"
-                    print("[Ready] Using base model (CPU)")
+                    self.backend_type = "whisper"
+                    self.using_gpu = False
+                    print("[Ready] Using Whisper base model (CPU)")
+                    if self.ui:
+                        self.ui.set_state("idle", "Ready (CPU)")
                 except Exception as e2:
                     print(f"[Fatal] Could not load any model: {e2}")
             finally:
                 self.model_loading = False
-        
+
         threading.Thread(target=_load, daemon=True).start()
     
     def keyboard_callback(self, nCode, wParam, lParam):
@@ -1066,33 +1086,19 @@ class CognitiveFlowApp:
                         threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
                     return
                 
-                if self.model is None:
+                if self.backend is None or not self.backend.is_loaded:
                     raise RuntimeError("Model not loaded")
-                
+
                 _start = _t()
-                segments, info = self.model.transcribe(
-                    audio_array,
-                    beam_size=5,
-                    language="en",
-                    vad_filter=False,
-                    word_timestamps=False,
-                    condition_on_previous_text=True,
-                    no_speech_threshold=0.9,
-                    hallucination_silence_threshold=None,
-                    initial_prompt="Transcribe naturally with contractions: isn't, don't, won't, can't, wasn't, shouldn't, couldn't, wouldn't.",
-                )
-                
-                segment_list = list(segments)
-                _timings['whisper_transcribe'] = (_t() - _start) * 1000
-                
-                _start = _t()
-                segment_texts = [seg.text.strip() for seg in segment_list]
-                raw_text = " ".join(segment_texts)
-                _timings['segment_join'] = (_t() - _start) * 1000
-                
+                result = self.backend.transcribe(audio_array, sample_rate=16000)
+                _timings['transcribe'] = result.duration_ms
+                raw_text = result.raw_text
+
                 if self.debug:
-                    logger.info("Raw", f'Whisper output: "{raw_text}"')
-                    logger.info("Segments", f"count={len(segment_list)}")
+                    backend_name = self.backend.name.capitalize()
+                    logger.info("Raw", f'{backend_name} output: "{raw_text}"')
+                    if result.segments:
+                        logger.info("Segments", f"count={len(result.segments)}")
                 
                 _start = _t()
                 processed_text = self.processor.process(raw_text)
@@ -1161,7 +1167,7 @@ class CognitiveFlowApp:
             logger.warning("Retry", "Model still loading...")
             return
 
-        if not self.model:
+        if not self.backend or not self.backend.is_loaded:
             logger.error("Retry", "Model not loaded")
             SoundEffects.play_error()
             return
@@ -1193,20 +1199,8 @@ class CognitiveFlowApp:
                 duration = len(audio_array) / sample_rate
                 logger.info("Retry", f"Transcribing {duration:.1f}s of audio...")
 
-                segments, info = self.model.transcribe(
-                    audio_array,
-                    beam_size=5,
-                    language="en",
-                    vad_filter=False,
-                    word_timestamps=False,
-                    condition_on_previous_text=True,
-                    no_speech_threshold=0.9,
-                    hallucination_silence_threshold=None,
-                    initial_prompt="Transcribe naturally with contractions: isn't, don't, won't, can't, wasn't, shouldn't, couldn't, wouldn't.",
-                )
-
-                segment_list = list(segments)
-                raw_text = " ".join([seg.text.strip() for seg in segment_list])
+                result = self.backend.transcribe(audio_array, sample_rate=sample_rate)
+                raw_text = result.raw_text
                 processed_text = self.processor.process(raw_text)
 
                 if processed_text:
@@ -1295,6 +1289,9 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.0 - NVIDIA Parakeet backend via onnx-asr (~50x faster)")
+        print("           - Backend selector in Settings: Whisper vs Parakeet")
+        print("           - TranscriptionBackend abstraction for swappable engines")
         print("    v1.7.1 - Fix OOM crash when rapidly switching models in Settings")
         print("    v1.7.0 - Audio saved before transcription (survives failures)")
         print("           - Retry Last Recording in right-click menu")
