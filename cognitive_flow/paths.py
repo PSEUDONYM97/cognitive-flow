@@ -30,3 +30,7 @@ CONFIG_FILE = APP_DATA_DIR / "config.json"
 STATS_FILE = APP_DATA_DIR / "statistics.json"
 HISTORY_FILE = APP_DATA_DIR / "history.json"
 DEBUG_LOG_FILE = APP_DATA_DIR / "debug_transcriptions.log"
+
+# Audio archive directory
+AUDIO_ARCHIVE_DIR = APP_DATA_DIR / "audio"
+AUDIO_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)

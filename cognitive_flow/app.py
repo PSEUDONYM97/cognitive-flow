@@ -13,6 +13,7 @@ import wave
 import tempfile
 import time
 import sys
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -342,6 +343,84 @@ class Statistics:
         return self.stats.get("total_words", 0) / records
 
 
+class AudioArchive:
+    """Save audio recordings as compressed FLAC files for future training data"""
+
+    @staticmethod
+    def save(audio_array, sample_rate: int, label: str = "") -> str | None:
+        """Save audio synchronously. Returns filename or None on failure."""
+        try:
+            from .paths import AUDIO_ARCHIVE_DIR
+            import soundfile as sf
+
+            # Generate filename: timestamp_hash.flac
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            # Hash from first 1000 samples + label for uniqueness
+            hash_input = audio_array[:1000].tobytes() + label.encode()
+            short_hash = hashlib.md5(hash_input).hexdigest()[:8]
+            filename = f"{timestamp}_{short_hash}.flac"
+            filepath = AUDIO_ARCHIVE_DIR / filename
+
+            # Save as FLAC (lossless compression, ~50% size of WAV)
+            sf.write(str(filepath), audio_array, sample_rate, format='FLAC')
+            return filename
+
+        except ImportError:
+            print("[Audio] soundfile not installed - skipping audio archive")
+            return None
+        except Exception as e:
+            print(f"[Audio] Failed to save: {e}")
+            return None
+
+    @staticmethod
+    def save_async(audio_array, sample_rate: int, text: str, callback=None):
+        """Save audio in background thread. Calls callback(filename) when done."""
+        def _save():
+            filename = AudioArchive.save(audio_array, sample_rate, text)
+            if callback and filename:
+                callback(filename)
+
+        threading.Thread(target=_save, daemon=True).start()
+
+    @staticmethod
+    def load(filename: str):
+        """Load audio from archive. Returns (audio_array, sample_rate) or (None, None)."""
+        try:
+            from .paths import AUDIO_ARCHIVE_DIR
+            import soundfile as sf
+
+            filepath = AUDIO_ARCHIVE_DIR / filename
+            if not filepath.exists():
+                print(f"[Audio] File not found: {filename}")
+                return None, None
+
+            audio_array, sample_rate = sf.read(str(filepath), dtype='float32')
+            return audio_array, sample_rate
+        except ImportError:
+            print("[Audio] soundfile not installed")
+            return None, None
+        except Exception as e:
+            print(f"[Audio] Failed to load: {e}")
+            return None, None
+
+    @staticmethod
+    def get_latest() -> str | None:
+        """Get the filename of the most recent audio file."""
+        try:
+            from .paths import AUDIO_ARCHIVE_DIR
+
+            files = list(AUDIO_ARCHIVE_DIR.glob("*.flac"))
+            if not files:
+                return None
+
+            # Sort by modification time, newest first
+            files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            return files[0].name
+        except Exception as e:
+            print(f"[Audio] Failed to get latest: {e}")
+            return None
+
+
 class TextProcessor:
     """Process transcribed text with correction pass for Whisper artifacts"""
     
@@ -396,11 +475,35 @@ class TextProcessor:
         
         return text
     
+    def _detect_hallucination_loop(self, text: str) -> str | None:
+        """Detect and remove Whisper hallucination loops (e.g., 'I'm I'm I'm...' 50 times)"""
+        import re
+        
+        # Find any word/phrase repeated 10+ times consecutively
+        # High threshold to avoid catching intentional repetition for emphasis
+        # Matches: "I'm I'm I'm..." (10+ times) but not "really really really"
+        pattern = r'\b(\w+(?:\'\w+)?)\s+(?:\1\s+){9,}'
+        match = re.search(pattern, text, re.IGNORECASE)
+        
+        if match:
+            repeated = match.group(1)
+            # Remove all but one instance of the repeated word
+            cleaned = re.sub(pattern, repeated + ' ', text, flags=re.IGNORECASE)
+            print(f"[Warning] Hallucination loop detected: '{repeated}' repeated, cleaned up")
+            return cleaned.strip()
+        
+        return None
+    
     def process(self, text: str) -> str:
         if not text:
             return text
         
         import re
+        
+        # Pass 0: Detect and fix hallucination loops
+        loop_fix = self._detect_hallucination_loop(text)
+        if loop_fix:
+            text = loop_fix
         
         # Pass 1: Fix Whisper artifacts (e.g., ",nd" -> "command")
         text = self._correct_whisper_artifacts(text)
@@ -661,6 +764,7 @@ class CognitiveFlowApp:
         # For retry functionality
         self.last_audio = None
         self.last_duration = 0.0
+        self.last_audio_file: str | None = None
         
         self.tray: SystemTray | None = None
         if HAS_TRAY:
@@ -694,6 +798,7 @@ class CognitiveFlowApp:
         self.add_trailing_space = True  # Add space after each transcription
         self.input_device_index = None  # None = system default
         self.show_overlay = True  # Show floating indicator
+        self.archive_audio = True  # Save audio recordings for future training
         
         if self.config_file.exists():
             try:
@@ -703,6 +808,7 @@ class CognitiveFlowApp:
                     self.add_trailing_space = config.get('add_trailing_space', True)
                     self.input_device_index = config.get('input_device_index', None)
                     self.show_overlay = config.get('show_overlay', True)
+                    self.archive_audio = config.get('archive_audio', True)
             except:
                 pass
     
@@ -712,6 +818,7 @@ class CognitiveFlowApp:
             'add_trailing_space': self.add_trailing_space,
             'input_device_index': self.input_device_index,
             'show_overlay': self.show_overlay,
+            'archive_audio': self.archive_audio,
         }
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -928,16 +1035,22 @@ class CognitiveFlowApp:
                 _t = time.perf_counter
                 _timings = {}
                 pipeline_start = _t()
-                
+
                 _start = _t()
                 audio_data = b''.join(self.frames)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 _timings['audio_convert'] = (_t() - _start) * 1000
-                
+
                 # Store for retry
                 self.last_audio = audio_array
                 self.last_duration = duration
-                
+
+                # Save audio EARLY (before transcription) so we don't lose it on failure
+                if self.archive_audio:
+                    self.last_audio_file = AudioArchive.save(audio_array, 16000, "pending")
+                    if self.last_audio_file and self.debug:
+                        logger.info("Audio", f"Saved: {self.last_audio_file}")
+
                 # Check for audio issues
                 max_amp = np.max(np.abs(audio_array))
                 num_samples = len(audio_array)
@@ -966,6 +1079,7 @@ class CognitiveFlowApp:
                     condition_on_previous_text=True,
                     no_speech_threshold=0.9,
                     hallucination_silence_threshold=None,
+                    initial_prompt="Transcribe naturally with contractions: isn't, don't, won't, can't, wasn't, shouldn't, couldn't, wouldn't.",
                 )
                 
                 segment_list = list(segments)
@@ -1000,7 +1114,7 @@ class CognitiveFlowApp:
                     self.stats.record(duration, processed_text, total_pipeline / 1000)
                     
                     if self.ui:
-                        self.ui.add_transcription(processed_text, duration)
+                        self.ui.add_transcription(processed_text, duration, self.last_audio_file)
                     
                     # Log to file for debugging terminal breaks (debug mode only)
                     if self.debug:
@@ -1037,7 +1151,92 @@ class CognitiveFlowApp:
                     self.ui.set_state("idle", "Ready")
         
         threading.Thread(target=_transcribe, daemon=True).start()
-    
+
+    def retry_last(self, audio_file: str | None = None):
+        """Retry transcription from saved audio file.
+
+        If audio_file is None, uses the most recent saved audio.
+        """
+        if self.model_loading:
+            logger.warning("Retry", "Model still loading...")
+            return
+
+        if not self.model:
+            logger.error("Retry", "Model not loaded")
+            SoundEffects.play_error()
+            return
+
+        # Find the audio file to retry
+        target_file = audio_file or self.last_audio_file or AudioArchive.get_latest()
+        if not target_file:
+            logger.warning("Retry", "No audio file to retry")
+            if self.ui:
+                self.ui.set_state("idle", "No audio!")
+                threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+            return
+
+        logger.info("Retry", f"Loading {target_file}...")
+        if self.ui:
+            self.ui.set_state("processing", "Retrying...")
+
+        def _retry():
+            try:
+                audio_array, sample_rate = AudioArchive.load(target_file)
+                if audio_array is None:
+                    logger.error("Retry", "Failed to load audio")
+                    SoundEffects.play_error()
+                    if self.ui:
+                        self.ui.set_state("idle", "Load failed!")
+                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                    return
+
+                duration = len(audio_array) / sample_rate
+                logger.info("Retry", f"Transcribing {duration:.1f}s of audio...")
+
+                segments, info = self.model.transcribe(
+                    audio_array,
+                    beam_size=5,
+                    language="en",
+                    vad_filter=False,
+                    word_timestamps=False,
+                    condition_on_previous_text=True,
+                    no_speech_threshold=0.9,
+                    hallucination_silence_threshold=None,
+                    initial_prompt="Transcribe naturally with contractions: isn't, don't, won't, can't, wasn't, shouldn't, couldn't, wouldn't.",
+                )
+
+                segment_list = list(segments)
+                raw_text = " ".join([seg.text.strip() for seg in segment_list])
+                processed_text = self.processor.process(raw_text)
+
+                if processed_text:
+                    output_text = processed_text + " " if self.add_trailing_space else processed_text
+                    VirtualKeyboard.type_text(output_text)
+
+                    self.stats.record(duration, processed_text, 0)
+                    if self.ui:
+                        self.ui.add_transcription(processed_text, duration, target_file)
+
+                    words = len(processed_text.split())
+                    logger.success("Retry", f"{words} words from {target_file}")
+                    if self.ui:
+                        self.ui.set_state("idle", f"{words} words")
+                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                else:
+                    logger.warning("Retry", "No speech detected")
+                    if self.ui:
+                        self.ui.set_state("idle", "No speech")
+                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+
+            except Exception as e:
+                logger.error("Retry", f"Failed: {e}")
+                SoundEffects.play_error()
+                if self.ui:
+                    self.ui.set_state("idle", "Retry failed!")
+                    threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+
+        threading.Thread(target=_retry, daemon=True).start()
+
     def run(self):
         if self.ui:
             self.ui.start()
@@ -1096,6 +1295,14 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.7.1 - Fix OOM crash when rapidly switching models in Settings")
+        print("    v1.7.0 - Audio saved before transcription (survives failures)")
+        print("           - Retry Last Recording in right-click menu")
+        print("    v1.6.3 - Hallucination loop detection (10+ repeats)")
+        print("    v1.6.2 - Initial prompt for better contraction accuracy")
+        print("    v1.6.1 - Settings UI fixes, live model switching")
+        print("    v1.6.0 - Audio archive: saves recordings as FLAC for training data")
+        print("           - Paired with transcriptions in history.json")
         print("    v1.5.1 - Reduced collapse delay to 3s, fix repaint on show")
         print("    v1.5.0 - Collapsible indicator (shrinks to dot when idle)")
         print("           - Expands on hover or when recording/processing")

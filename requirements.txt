@@ -15,6 +15,7 @@ pillow>=10.0.0
 # Utilities
 numpy>=1.24.0
 pyperclip>=1.8.0
+soundfile>=0.12.0  # FLAC audio archiving for training data
 
 # GPU Support (optional but recommended for speed)
 # These provide CUDA libraries for GPU acceleration

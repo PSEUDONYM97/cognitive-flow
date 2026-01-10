@@ -62,7 +62,7 @@ class TranscriptionHistory:
         with open(self.filepath, 'w', encoding='utf-8') as f:
             json.dump(self.entries, f, indent=2, ensure_ascii=False)
     
-    def add(self, text: str, duration: float):
+    def add(self, text: str, duration: float, audio_file: str | None = None):
         entry = {
             "timestamp": datetime.now().isoformat(),
             "text": text,
@@ -70,6 +70,8 @@ class TranscriptionHistory:
             "words": len(text.split()),
             "chars": len(text)
         }
+        if audio_file:
+            entry["audio_file"] = audio_file
         self.entries.insert(0, entry)
         self.entries = self.entries[:500]
         self._save()
@@ -108,8 +110,8 @@ class SettingsDialog(QDialog):
         container = QFrame()
         container.setObjectName("settingsContainer")
         container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(40, 36, 40, 36)
-        container_layout.setSpacing(32)
+        container_layout.setContentsMargins(32, 32, 24, 32)  # Less right margin for scrollbar
+        container_layout.setSpacing(24)
         
         # Header
         header_layout = QHBoxLayout()
@@ -139,9 +141,10 @@ class SettingsDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         scroll_content = QWidget()
+        scroll_content.setMaximumWidth(400)  # Constrain content width
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setSpacing(40)
-        scroll_layout.setContentsMargins(0, 8, 16, 8)
+        scroll_layout.setContentsMargins(0, 8, 24, 8)  # More right margin for scrollbar
         
         # Input Device Selection
         scroll_layout.addWidget(self._create_section_header("Microphone"))
@@ -365,24 +368,33 @@ class SettingsDialog(QDialog):
                 border: none;
             }}
             
-            QScrollBar:vertical {{
+            QScrollArea > QWidget > QWidget {{
                 background-color: transparent;
+            }}
+            
+            QScrollBar:vertical {{
+                background-color: rgba(255, 255, 255, 5);
                 width: 8px;
-                margin: 0px;
+                margin: 4px 2px 4px 0px;
+                border-radius: 4px;
             }}
             
             QScrollBar::handle:vertical {{
-                background-color: {COLORS['border_subtle'].name()};
+                background-color: rgba(255, 255, 255, 40);
                 border-radius: 4px;
-                min-height: 20px;
+                min-height: 30px;
             }}
             
             QScrollBar::handle:vertical:hover {{
-                background-color: {COLORS['border_strong'].name()};
+                background-color: rgba(255, 255, 255, 60);
             }}
             
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
+            }}
+            
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background-color: transparent;
             }}
         """)
         
@@ -470,9 +482,7 @@ class SettingsDialog(QDialog):
         print(f"[Clipboard] Copied: {text[:50]}{'...' if len(text) > 50 else ''}")
     
     def _on_model_changed(self, model_name):
-        """Handle model selection change"""
-        print(f"[Settings] Model changed to: {model_name}")
-        
+        """Handle model selection change - reloads model live"""
         descriptions = {
             "tiny": "Fastest but least accurate - good for testing",
             "base": "Fast with reasonable accuracy",
@@ -480,15 +490,31 @@ class SettingsDialog(QDialog):
             "medium": "Best balance of speed and accuracy (recommended)",
             "large": "Most accurate but slower - requires more RAM"
         }
-        
+
         self.model_desc.setText(descriptions.get(model_name, ""))
-        
+
         if self.app_ref:
-            if hasattr(self.app_ref, 'model_name'):
-                self.app_ref.model_name = model_name
+            # Skip if same model
+            if hasattr(self.app_ref, 'model_name') and self.app_ref.model_name == model_name:
+                return
+
+            # Skip if already loading a model (prevents OOM from rapid clicking)
+            if hasattr(self.app_ref, 'model_loading') and self.app_ref.model_loading:
+                print(f"[Settings] Model already loading - ignoring {model_name}")
+                # Reset combo to current model
+                self.model_combo.blockSignals(True)
+                self.model_combo.setCurrentText(self.app_ref.model_name)
+                self.model_combo.blockSignals(False)
+                return
+
+            self.app_ref.model_name = model_name
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
-                print(f"[Settings] Model saved. Restart app to use {model_name} model.")
+
+            # Reload model in background
+            if hasattr(self.app_ref, 'load_model'):
+                print(f"[Settings] Loading {model_name} model...")
+                self.app_ref.load_model()
     
     def _on_trailing_space_changed(self, checked):
         """Handle trailing space toggle"""
@@ -527,11 +553,12 @@ class FloatingIndicator(QWidget):
     COLLAPSED_WIDTH = 44  # Just enough for the dot with padding
     COLLAPSE_DELAY_MS = 3000  # 3 seconds
     
-    def __init__(self, on_click=None, get_last_transcription=None, show_settings=None):
+    def __init__(self, on_click=None, get_last_transcription=None, show_settings=None, retry_last=None):
         super().__init__()
         self.on_click = on_click
         self.get_last_transcription = get_last_transcription
         self.show_settings_callback = show_settings
+        self.retry_last_callback = retry_last
         
         # State
         self.state = "loading"
@@ -844,13 +871,17 @@ class FloatingIndicator(QWidget):
         copy_action = QAction("Copy Last Transcription", self)
         copy_action.triggered.connect(self.copy_last_transcription)
         menu.addAction(copy_action)
-        
+
+        retry_action = QAction("Retry Last Recording", self)
+        retry_action.triggered.connect(self.retry_last_recording)
+        menu.addAction(retry_action)
+
         menu.addSeparator()
-        
+
         settings_action = QAction("Settings...", self)
         settings_action.triggered.connect(self.show_settings_callback)
         menu.addAction(settings_action)
-        
+
         menu.exec(self.mapToGlobal(position))
     
     def copy_last_transcription(self):
@@ -861,6 +892,11 @@ class FloatingIndicator(QWidget):
                 clipboard = QApplication.clipboard()
                 clipboard.setText(text)
                 print(f"[Clipboard] Copied: {text[:50]}{'...' if len(text) > 50 else ''}")
+
+    def retry_last_recording(self):
+        """Retry transcription from last saved audio"""
+        if self.retry_last_callback:
+            self.retry_last_callback()
     
     def enterEvent(self, event):
         self._is_hovered = True
@@ -934,7 +970,8 @@ class CognitiveFlowUI(QObject):
         self.indicator = FloatingIndicator(
             on_click=self.app.toggle_recording if hasattr(self.app, 'toggle_recording') else None,
             get_last_transcription=self.get_last_transcription,
-            show_settings=self.show_settings
+            show_settings=self.show_settings,
+            retry_last=self.app.retry_last if hasattr(self.app, 'retry_last') else None
         )
         self.indicator.show()
     
@@ -956,9 +993,9 @@ class CognitiveFlowUI(QObject):
             return recent[0].get("text", "")
         return None
     
-    def add_transcription(self, text: str, duration: float):
+    def add_transcription(self, text: str, duration: float, audio_file: str | None = None):
         """Add to history"""
-        self.history.add(text, duration)
+        self.history.add(text, duration, audio_file)
     
     def show(self):
         """Show the overlay indicator"""
