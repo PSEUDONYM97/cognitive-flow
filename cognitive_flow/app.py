@@ -920,21 +920,46 @@ class CognitiveFlowApp:
                     self.ui.set_state("idle", status)
 
             except Exception as e:
-                print(f"[Error] Failed to load: {e}")
-                # Fallback to Whisper base on CPU
+                print(f"[Error] Failed to load {self.backend_type}: {e}")
+
+                # If Parakeet failed, fall back to Whisper and save config
+                original_backend = self.backend_type
+                if original_backend == 'parakeet':
+                    print("[Fallback] Parakeet failed - reverting to Whisper")
+
+                # Fallback to Whisper on CPU
                 try:
                     from .backends import WhisperBackend
                     self.backend = WhisperBackend()
-                    self.backend.load("base", use_gpu=False)
+
+                    # Try user's preferred Whisper model first
+                    fallback_model = self.model_name if self.model_name else "small"
+                    if not self.backend.load(fallback_model, use_gpu=GPU_AVAILABLE):
+                        # Last resort: base on CPU
+                        self.backend.load("base", use_gpu=False)
+                        fallback_model = "base"
+
                     self.model = self.backend
-                    self.model_name = "base"
+                    self.model_name = fallback_model
                     self.backend_type = "whisper"
-                    self.using_gpu = False
-                    print("[Ready] Using Whisper base model (CPU)")
+                    self.using_gpu = self.backend.using_gpu
+
+                    # Save config so we don't try failed backend on next startup
+                    if original_backend != 'whisper':
+                        self.save_config()
+                        print(f"[Config] Reverted to Whisper ({fallback_model})")
+
+                    device = "GPU" if self.using_gpu else "CPU"
+                    print(f"[Ready] Using Whisper {fallback_model} ({device})")
                     if self.ui:
-                        self.ui.set_state("idle", "Ready (CPU)")
+                        self.ui.set_state("idle", f"Ready ({device})")
+                    if self.tray:
+                        self.tray.update_icon(recording=False, loading=False)
+
                 except Exception as e2:
                     print(f"[Fatal] Could not load any model: {e2}")
+                    if self.ui:
+                        self.ui.set_state("idle", "No model!")
             finally:
                 self.model_loading = False
 
@@ -1289,6 +1314,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.1 - Graceful fallback: Parakeet failure auto-reverts to Whisper")
+        print("           - Better error handling for missing CUDA libs")
         print("    v1.8.0 - NVIDIA Parakeet backend via onnx-asr (~50x faster)")
         print("           - Backend selector in Settings: Whisper vs Parakeet")
         print("           - TranscriptionBackend abstraction for swappable engines")

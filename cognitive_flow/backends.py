@@ -171,21 +171,34 @@ class ParakeetBackend(TranscriptionBackend):
         try:
             import onnx_asr
 
-            # Determine execution provider
+            # Try GPU first, then CPU fallback
             if use_gpu:
                 try:
-                    # Try CUDA first
+                    # Try CUDA - but onnxruntime may fail if CUDA libs missing
                     self._model = onnx_asr.load_model(
                         model_name,
                         providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
                     )
+                    # Check if CUDA actually loaded (onnxruntime silently falls back)
                     self._using_gpu = True
+                    print(f"[Parakeet] Loaded {model_name} (GPU attempt)")
                 except Exception as e:
-                    print(f"[Parakeet] GPU failed: {e}, falling back to CPU")
-                    self._model = onnx_asr.load_model(model_name)
-                    self._using_gpu = False
+                    print(f"[Parakeet] GPU load failed: {e}")
+                    print("[Parakeet] Falling back to CPU...")
+                    try:
+                        self._model = onnx_asr.load_model(
+                            model_name,
+                            providers=["CPUExecutionProvider"]
+                        )
+                        self._using_gpu = False
+                    except Exception as cpu_e:
+                        print(f"[Parakeet] CPU fallback also failed: {cpu_e}")
+                        return False
             else:
-                self._model = onnx_asr.load_model(model_name)
+                self._model = onnx_asr.load_model(
+                    model_name,
+                    providers=["CPUExecutionProvider"]
+                )
                 self._using_gpu = False
 
             self._model_name = model_name
