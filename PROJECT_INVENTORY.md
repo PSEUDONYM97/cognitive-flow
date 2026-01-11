@@ -1,7 +1,7 @@
 # Cognitive Flow - Project Inventory
 
-**Generated:** 2026-01-10
-**Version:** 1.8.6
+**Generated:** 2026-01-11
+**Version:** 1.8.9
 **Status:** Active, Stable
 
 ---
@@ -15,8 +15,8 @@
 - **Instant Auto-Type**: Transcribed text is typed directly into the currently focused window using Windows WM_CHAR messages
 - **Dual Backend Support**:
   - **Whisper** (OpenAI via faster-whisper): Default backend, widely compatible
-  - **Parakeet** (NVIDIA via onnx-asr): Faster and more accurate when available
-- **GPU Acceleration**: 45-50x faster transcription with NVIDIA CUDA (0.2s for 10s of audio vs 9s on CPU)
+  - **Parakeet** (NVIDIA via onnx-asr): ~50x faster and more accurate when available
+- **GPU Acceleration**: 50-100x faster transcription with NVIDIA CUDA
 - **System Tray Integration**: Runs quietly with status indicator and settings access
 - **Floating Overlay**: Collapsible visual indicator showing recording/processing state
 
@@ -30,6 +30,8 @@
 - Trailing space toggle for consecutive transcriptions
 - Model switching without restart (lazy loading)
 - Retry last recording functionality
+- Auto-cleanup of corrupted model downloads
+- Settings dropdowns disabled during model loading (prevents lockups)
 
 ---
 
@@ -64,24 +66,27 @@ Power users, developers, and professionals who:
 
 ```
 cognitive_flow/
-    __init__.py      # v1.8.6, package exports
+    __init__.py      # v1.8.9, package exports
     __main__.py      # Entry point for python -m
-    app.py           # Main application (1375 lines)
+    app.py           # Main application (~1400 lines)
                      # - CognitiveFlowApp: orchestrates everything
                      # - Windows keyboard hook (WH_KEYBOARD_LL)
                      # - Audio recording via PyAudio
                      # - Threading model for recording/transcription
                      # - VirtualKeyboard: WM_CHAR text injection
                      # - Statistics, TextProcessor, AudioArchive
-    backends.py      # Transcription backends abstraction
+    backends.py      # Transcription backends abstraction (~430 lines)
                      # - TranscriptionBackend ABC
                      # - WhisperBackend (faster-whisper)
                      # - ParakeetBackend (onnx-asr)
                      # - CUDA path setup for pip-installed NVIDIA libs
-    ui.py            # PyQt6 UI (1150+ lines)
+                     # - Auto-cleanup for failed downloads
+    ui.py            # PyQt6 UI (~1200 lines)
                      # - FloatingIndicator: collapsible overlay
                      # - SettingsDialog: full configuration UI
+                     # - NoScrollComboBox: prevents accidental changes
                      # - TranscriptionHistory: JSON persistence
+                     # - Loading state management
     logger.py        # ColoredLogger with timing support
     paths.py         # %APPDATA%\CognitiveFlow path constants
     warmup.py        # Windows startup task installer
@@ -131,6 +136,16 @@ All in `%APPDATA%\CognitiveFlow\`:
    - Spoken punctuation conversion
    - Spacing cleanup
 
+6. **State Management**:
+   - Timer-based state reset with cancellation (prevents race conditions)
+   - QueuedConnection for thread-safe UI updates
+   - Loading state tracking to prevent concurrent model loads
+
+7. **Error Recovery**:
+   - Graceful fallback from Parakeet to Whisper on failure
+   - Auto-cleanup of corrupted HuggingFace cache downloads
+   - Settings dropdowns disabled during loading
+
 ---
 
 ## WHEN
@@ -139,34 +154,33 @@ All in `%APPDATA%\CognitiveFlow\`:
 
 | Date | Event |
 |------|-------|
-| 2025-12-29 | Initial MVP commit ("Add Cognitive Flow - local voice transcription MVP") |
+| 2025-12-29 | Initial MVP commit |
 | 2025-12-29 | PyQt6 UI, color-coded logging, enhanced stats |
-| 2026-01-01 | .gitignore, config improvements |
 | 2026-01-02 | Package restructure (pyproject.toml) |
-| 2026-01-04 | Logger improvements |
 | 2026-01-05 | Path management, warmup installer |
 | 2026-01-10 | v1.8.0-1.8.6: Parakeet backend, CUDA fixes, lazy loading |
-
-### Commit Activity
-- **Total Commits**: 40
-- **First Commit**: 2025-12-29
-- **Last Commit**: 2026-01-10 (today)
-- **Development Span**: ~12 days of active development
+| 2026-01-10 | v1.8.7-1.8.8: State race condition fixes, scroll wheel fix |
+| 2026-01-11 | v1.8.9: Loading state protection, auto-cleanup |
 
 ### Current Status: **Active, Stable**
 
 The project is:
 - Functionally complete for its core purpose
-- Actively maintained (commits today)
-- At version 1.8.6 with mature feature set
-- Has clear versioning discipline (version bumps in commits)
+- Actively maintained
+- At version 1.8.9 with mature feature set
+- Has clear versioning discipline
 
 ### Recent Work (v1.8.x series)
-- NVIDIA Parakeet backend integration
-- CUDA DLL loading improvements
-- Lazy loading for 50x faster startup
-- State race condition fixes
-- Overlay visibility fixes
+- v1.8.9: Disable dropdowns during model loading, auto-cleanup failed downloads
+- v1.8.8: Disable scroll wheel on settings dropdowns
+- v1.8.7: Fix recording state not showing (force immediate color update)
+- v1.8.6: Fix state race condition (cancel pending timers)
+- v1.8.5: Fix disappearing overlay, reset position menu item
+- v1.8.4: Lazy loading for 50x faster startup
+- v1.8.3: nvrtc DLL support, suppress onnxruntime warnings
+- v1.8.2: Shared CUDA path setup
+- v1.8.1: Graceful Parakeet-to-Whisper fallback
+- v1.8.0: NVIDIA Parakeet backend via onnx-asr
 
 ---
 
@@ -185,8 +199,11 @@ cognitive-flow --debug      # Foreground with verbose logging
 python -m cognitive_flow
 python -m cognitive_flow --debug
 
-# GPU acceleration
-pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
+# GPU acceleration (Whisper)
+pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12
+
+# Parakeet backend
+pip install onnx-asr[gpu,hub]
 
 # Startup task
 python -m cognitive_flow.warmup --install
@@ -196,6 +213,7 @@ python -m cognitive_flow.warmup --install
 - **~ (tilde)**: Start/stop recording
 - **Right-click overlay**: Open settings
 - **System tray > Quit**: Exit application
+- **System tray > Reset Overlay Position**: Fix missing overlay
 
 ---
 
@@ -207,13 +225,13 @@ python -m cognitive_flow.warmup --install
 - GPU acceleration without system CUDA installation
 - Privacy-first design
 - Good error handling with graceful fallbacks
+- Auto-cleanup of corrupted downloads
 - Proper versioning discipline
 
 ### Areas for Improvement
 - Windows-only (Linux/Mac support would require significant work)
-- GitHub repo URL is placeholder ("yourusername")
 - No automated tests
-- pyproject.toml version (1.1.0) out of sync with __init__.py (1.8.6)
+- pyproject.toml version out of sync with __init__.py
 
 ### Dependencies Health
 All dependencies are standard, maintained packages with good track records.
