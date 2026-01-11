@@ -2,10 +2,12 @@
 Cognitive Flow UI - PyQt6 floating indicator and settings dialog.
 """
 
-from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, 
-                              QMenu, QDialog, QPushButton, QComboBox, QSpinBox, 
+from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
+                              QMenu, QDialog, QPushButton, QComboBox, QSpinBox,
                               QCheckBox, QScrollArea, QFrame, QGraphicsDropShadowEffect)
-from PyQt6.QtCore import (Qt, QPropertyAnimation, QEasingCurve, pyqtProperty, 
+
+
+from PyQt6.QtCore import (Qt, QPropertyAnimation, QEasingCurve, pyqtProperty,
                           QObject, pyqtSignal, QTimer, QPoint, QSize)
 from PyQt6.QtGui import (QPainter, QColor, QRadialGradient, QFont, QAction, 
                          QPainterPath, QLinearGradient, QPen, QCursor, QGuiApplication)
@@ -14,6 +16,12 @@ import json
 from datetime import datetime
 
 from .paths import HISTORY_FILE
+
+
+class NoScrollComboBox(QComboBox):
+    """ComboBox that ignores scroll wheel events to prevent accidental changes."""
+    def wheelEvent(self, event):
+        event.ignore()  # Pass to parent (scroll area) instead of changing value
 
 
 # Professional color system
@@ -151,7 +159,7 @@ class SettingsDialog(QDialog):
         input_layout = QVBoxLayout()
         input_layout.setSpacing(8)
         
-        self.input_combo = QComboBox()
+        self.input_combo = NoScrollComboBox()
         self.input_combo.setObjectName("settingsCombo")
         self.input_combo.setFixedHeight(36)
         
@@ -186,7 +194,7 @@ class SettingsDialog(QDialog):
         backend_layout = QVBoxLayout()
         backend_layout.setSpacing(8)
 
-        self.backend_combo = QComboBox()
+        self.backend_combo = NoScrollComboBox()
         self.backend_combo.addItem("Whisper (OpenAI)", "whisper")
         self.backend_combo.addItem("Parakeet (NVIDIA) - Faster", "parakeet")
         self.backend_combo.setObjectName("settingsCombo")
@@ -214,7 +222,7 @@ class SettingsDialog(QDialog):
         model_layout = QVBoxLayout()
         model_layout.setSpacing(8)
 
-        self.model_combo = QComboBox()
+        self.model_combo = NoScrollComboBox()
         self.model_combo.setObjectName("settingsCombo")
         self.model_combo.setFixedHeight(36)
         self._populate_model_combo()  # Populate based on current backend

@@ -1314,6 +1314,7 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.8 - Disable scroll wheel on settings dropdowns (prevent accidental changes)")
         print("    v1.8.7 - Fix recording state not showing: force immediate color update")
         print("           - Use QueuedConnection for thread-safe UI updates")
         print("           - Add processEvents() after state change for immediate visibility")
