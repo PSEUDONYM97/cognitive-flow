@@ -745,6 +745,9 @@ class CognitiveFlowApp:
         self.last_audio = None
         self.last_duration = 0.0
         self.last_audio_file: str | None = None
+
+        # State reset timer (to prevent race conditions)
+        self._state_reset_timer: threading.Timer | None = None
         
         self.tray: SystemTray | None = None
         if HAS_TRAY:
@@ -998,11 +1001,29 @@ class CognitiveFlowApp:
         else:
             self.stop_recording()
     
+    def _cancel_state_reset(self):
+        """Cancel any pending state reset timer"""
+        if self._state_reset_timer:
+            self._state_reset_timer.cancel()
+            self._state_reset_timer = None
+
+    def _schedule_state_reset(self, delay: float = 2.0):
+        """Schedule state reset to 'Ready' after delay, cancelling any existing timer"""
+        self._cancel_state_reset()
+        def _reset():
+            if self.ui and not self.is_recording:
+                self.ui.set_state("idle", "Ready")
+        self._state_reset_timer = threading.Timer(delay, _reset)
+        self._state_reset_timer.start()
+
     def start_recording(self):
+        # Cancel any pending state reset before changing to recording state
+        self._cancel_state_reset()
+
         self.is_recording = True
         self.frames = []
         self.record_start_time = time.time()
-        
+
         SoundEffects.play_start()
         if self.debug:
             logger.info("Record", "Listening...")
@@ -1087,7 +1108,7 @@ class CognitiveFlowApp:
                     SoundEffects.play_error()
                     if self.ui:
                         self.ui.set_state("idle", "No audio!")
-                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                        self._schedule_state_reset()
                     return
                 
                 if self.backend is None or not self.backend.is_loaded:
@@ -1148,7 +1169,7 @@ class CognitiveFlowApp:
                     
                     if self.ui:
                         self.ui.set_state("idle", f"{words} words")
-                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                        self._schedule_state_reset()
                 else:
                     logger.warning("Audio", "No speech detected")
                     if self.ui:
@@ -1182,7 +1203,7 @@ class CognitiveFlowApp:
             logger.warning("Retry", "No audio file to retry")
             if self.ui:
                 self.ui.set_state("idle", "No audio!")
-                threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                self._schedule_state_reset()
             return
 
         logger.info("Retry", f"Loading {target_file}...")
@@ -1197,7 +1218,7 @@ class CognitiveFlowApp:
                     SoundEffects.play_error()
                     if self.ui:
                         self.ui.set_state("idle", "Load failed!")
-                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                        self._schedule_state_reset()
                     return
 
                 duration = len(audio_array) / sample_rate
@@ -1219,19 +1240,19 @@ class CognitiveFlowApp:
                     logger.success("Retry", f"{words} words from {target_file}")
                     if self.ui:
                         self.ui.set_state("idle", f"{words} words")
-                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                        self._schedule_state_reset()
                 else:
                     logger.warning("Retry", "No speech detected")
                     if self.ui:
                         self.ui.set_state("idle", "No speech")
-                        threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                        self._schedule_state_reset()
 
             except Exception as e:
                 logger.error("Retry", f"Failed: {e}")
                 SoundEffects.play_error()
                 if self.ui:
                     self.ui.set_state("idle", "Retry failed!")
-                    threading.Timer(2.0, lambda: self.ui and self.ui.set_state("idle", "Ready")).start()
+                    self._schedule_state_reset()
 
         threading.Thread(target=_retry, daemon=True).start()
 
@@ -1293,6 +1314,7 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.6 - Fix state race condition: cancel pending timers on new recording")
         print("    v1.8.5 - Fix disappearing overlay: ensure_visible(), refresh geometry")
         print("           - Add 'Reset Overlay Position' to system tray menu")
         print("    v1.8.4 - Lazy backend loading: 50x faster startup (~8s -> 0.16s)")
