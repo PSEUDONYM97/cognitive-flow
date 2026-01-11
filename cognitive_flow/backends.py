@@ -340,6 +340,61 @@ class ParakeetBackend(TranscriptionBackend):
     def using_gpu(self) -> bool:
         return self._using_gpu
 
+    @staticmethod
+    def cleanup_failed_download(model_name: str) -> bool:
+        """Clean up corrupted or partial model downloads.
+
+        Returns True if cleanup was performed, False otherwise.
+        """
+        try:
+            import shutil
+
+            # onnx-asr uses HuggingFace Hub cache
+            # Models are stored in ~/.cache/huggingface/hub/
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+
+            if not cache_dir.exists():
+                return False
+
+            cleaned = False
+
+            # Look for model directories matching the model name
+            # HF hub uses format like "models--nvidia--parakeet-tdt-0.6b"
+            # onnx-asr model names like "nemo-parakeet-tdt-0.6b-v2" map to HF names
+            model_patterns = [
+                f"*parakeet*{model_name.split('-')[-1]}*",  # e.g., *parakeet*v2*
+                f"*{model_name.replace('-', '*')}*",
+            ]
+
+            for pattern in model_patterns:
+                for model_dir in cache_dir.glob(pattern):
+                    if model_dir.is_dir():
+                        # Check for incomplete downloads (blobs with .incomplete suffix)
+                        blobs_dir = model_dir / "blobs"
+                        if blobs_dir.exists():
+                            incomplete_files = list(blobs_dir.glob("*.incomplete"))
+                            if incomplete_files:
+                                print(f"[Parakeet] Found {len(incomplete_files)} incomplete downloads in {model_dir.name}")
+                                # Remove the entire model directory
+                                shutil.rmtree(model_dir)
+                                print(f"[Parakeet] Cleaned up corrupted cache: {model_dir.name}")
+                                cleaned = True
+                                continue
+
+                        # Also check for lock files that indicate interrupted downloads
+                        lock_files = list(model_dir.glob("*.lock"))
+                        if lock_files:
+                            print(f"[Parakeet] Found stale lock files in {model_dir.name}")
+                            for lock in lock_files:
+                                lock.unlink(missing_ok=True)
+                            cleaned = True
+
+            return cleaned
+
+        except Exception as e:
+            print(f"[Parakeet] Cleanup failed: {e}")
+            return False
+
 
 # Backend registry
 BACKENDS = {

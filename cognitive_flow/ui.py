@@ -90,17 +90,21 @@ class TranscriptionHistory:
 
 class SettingsDialog(QDialog):
     """Professional settings dialog with all app configuration"""
-    
+
     def __init__(self, parent=None, app_ref=None):
         super().__init__(parent)
         self.app_ref = app_ref
-        
+
         # Window setup
         self.setWindowTitle("Cognitive Flow Settings")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(480, 600)
-        
+
+        # Timer to check model loading state
+        self._loading_check_timer = QTimer(self)
+        self._loading_check_timer.timeout.connect(self._update_loading_state)
+
         # Center on screen
         screen = QGuiApplication.primaryScreen()
         screen_geometry = screen.availableGeometry()
@@ -638,7 +642,29 @@ class SettingsDialog(QDialog):
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
             print(f"[Settings] Trailing space: {'on' if checked else 'off'}")
-    
+
+    def _update_loading_state(self):
+        """Check if model is loading and enable/disable dropdowns accordingly"""
+        is_loading = self.app_ref and hasattr(self.app_ref, 'model_loading') and self.app_ref.model_loading
+        self.backend_combo.setEnabled(not is_loading)
+        self.model_combo.setEnabled(not is_loading)
+        # Update model description to show loading status
+        if is_loading:
+            self.model_desc.setText("Model is loading... please wait")
+            self.model_desc.setStyleSheet(f"color: {COLORS['processing'].name()}; font-size: 11px;")
+        else:
+            # Reset style back to muted and update description
+            self.model_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+            self._update_model_description()
+
+    def exec(self):
+        """Override exec to start loading state check timer"""
+        self._update_loading_state()  # Initial check
+        self._loading_check_timer.start(500)  # Check every 500ms
+        result = super().exec()
+        self._loading_check_timer.stop()
+        return result
+
     def _on_input_device_changed(self, index):
         """Handle input device selection change"""
         if self.app_ref:

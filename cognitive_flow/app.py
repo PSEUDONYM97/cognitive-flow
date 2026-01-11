@@ -904,10 +904,14 @@ class CognitiveFlowApp:
             except Exception as e:
                 print(f"[Error] Failed to load {self.backend_type}: {e}")
 
-                # If Parakeet failed, fall back to Whisper and save config
+                # If Parakeet failed, clean up corrupted downloads and fall back to Whisper
                 original_backend = self.backend_type
                 if original_backend == 'parakeet':
                     print("[Fallback] Parakeet failed - reverting to Whisper")
+                    # Clean up any corrupted/partial downloads
+                    from .backends import ParakeetBackend
+                    if ParakeetBackend.cleanup_failed_download(self.parakeet_model):
+                        print("[Cleanup] Removed corrupted Parakeet cache files")
 
                 # Fallback to Whisper on CPU
                 try:
@@ -1314,6 +1318,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.9 - Disable dropdowns during model loading (prevent lockups)")
+        print("           - Auto-cleanup corrupted Parakeet downloads on load failure")
         print("    v1.8.8 - Disable scroll wheel on settings dropdowns (prevent accidental changes)")
         print("    v1.8.7 - Fix recording state not showing: force immediate color update")
         print("           - Use QueuedConnection for thread-safe UI updates")
