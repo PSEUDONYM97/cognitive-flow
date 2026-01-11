@@ -953,18 +953,24 @@ class FloatingIndicator(QWidget):
         }
         
         dot_color, text_color = state_config.get(state, state_config["idle"])
-        
-        # Smooth transitions
+
+        # Force immediate color update (in case animation fails)
+        self._circle_color = dot_color
+        self._text_color = text_color
+        self.status_label.setStyleSheet(f"color: {text_color.name()};")
+        self.update()  # Force repaint
+
+        # Smooth transitions (will animate from current to same color, but ensures repaint)
         self.color_animation.stop()
         self.color_animation.setDuration(300)
-        self.color_animation.setStartValue(self._circle_color)
+        self.color_animation.setStartValue(dot_color)
         self.color_animation.setEndValue(dot_color)
         self.color_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.color_animation.start()
-        
+
         self.text_color_animation.stop()
         self.text_color_animation.setDuration(300)
-        self.text_color_animation.setStartValue(self._text_color)
+        self.text_color_animation.setStartValue(text_color)
         self.text_color_animation.setEndValue(text_color)
         self.text_color_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.text_color_animation.start()
@@ -1093,8 +1099,9 @@ class CognitiveFlowUI(QObject):
         self.history = TranscriptionHistory()
         self.settings_dialog = None
         
-        self.state_changed.connect(self._update_indicator_state)
-        self.show_settings_signal.connect(self._show_settings_on_main_thread)
+        # Use QueuedConnection to ensure UI updates happen on Qt main thread
+        self.state_changed.connect(self._update_indicator_state, Qt.ConnectionType.QueuedConnection)
+        self.show_settings_signal.connect(self._show_settings_on_main_thread, Qt.ConnectionType.QueuedConnection)
     
     def start(self):
         """Start Qt application"""
@@ -1116,6 +1123,9 @@ class CognitiveFlowUI(QObject):
         if status_text is None:
             status_text = ""
         self.state_changed.emit(state, status_text)
+        # Force immediate Qt event processing to ensure state change is visible
+        if self.qt_app:
+            self.qt_app.processEvents()
     
     def get_last_transcription(self):
         """Get last transcription"""
