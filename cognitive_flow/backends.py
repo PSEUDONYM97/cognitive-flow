@@ -3,11 +3,78 @@ Transcription backends for Cognitive Flow.
 Provides unified interface for Whisper and Parakeet ASR models.
 """
 
+import ctypes
+import os
+import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import NamedTuple
+
+# Track if CUDA paths have been set up (shared across backends)
+_cuda_paths_configured = False
+
+
+def setup_cuda_paths():
+    """Add NVIDIA pip package DLLs to PATH for CUDA support.
+
+    This is needed for both faster-whisper (ctranslate2) and onnxruntime
+    when using nvidia-* pip packages instead of system CUDA install.
+    """
+    global _cuda_paths_configured
+    if _cuda_paths_configured:
+        return
+
+    nvidia_packages = [
+        "nvidia/cublas/bin",
+        "nvidia/cuda_runtime/bin",
+        "nvidia/cudnn/bin",
+        "nvidia/cufft/bin",
+        "nvidia/curand/bin",
+        "nvidia/cusolver/bin",
+        "nvidia/cusparse/bin",
+        "nvidia/nvjitlink/bin",
+    ]
+
+    added_paths = []
+    for site_dir in sys.path:
+        if "site-packages" in site_dir:
+            for pkg in nvidia_packages:
+                pkg_path = os.path.join(site_dir, pkg)
+                if os.path.isdir(pkg_path):
+                    if pkg_path not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = pkg_path + os.pathsep + os.environ.get("PATH", "")
+                    try:
+                        os.add_dll_directory(pkg_path)
+                    except (AttributeError, OSError):
+                        pass
+                    added_paths.append(pkg_path)
+
+    # Preload critical DLLs
+    critical_dlls = [
+        "cudart64_12.dll",
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cudnn64_9.dll",
+        "cudnn_ops64_9.dll",
+        "cufft64_11.dll",
+    ]
+    loaded = 0
+    for dll_dir in added_paths:
+        for dll in critical_dlls:
+            dll_path = os.path.join(dll_dir, dll)
+            if os.path.exists(dll_path):
+                try:
+                    ctypes.CDLL(dll_path)
+                    loaded += 1
+                except OSError:
+                    pass
+
+    if added_paths:
+        print(f"[CUDA] Added {len(added_paths)} NVIDIA paths, preloaded {loaded} DLLs")
+
+    _cuda_paths_configured = True
 
 
 class TranscriptionResult(NamedTuple):
@@ -67,6 +134,10 @@ class WhisperBackend(TranscriptionBackend):
 
     def load(self, model_name: str, use_gpu: bool = True) -> bool:
         """Load Whisper model."""
+        # Set up CUDA paths before importing faster_whisper
+        if use_gpu:
+            setup_cuda_paths()
+
         from faster_whisper import WhisperModel
 
         try:
@@ -165,69 +236,13 @@ class ParakeetBackend(TranscriptionBackend):
         self._model = None
         self._model_name = None
         self._using_gpu = False
-        self._cuda_paths_added = False
-
-    def _setup_cuda_paths(self):
-        """Add NVIDIA pip package DLLs to PATH for onnxruntime CUDA support."""
-        if self._cuda_paths_added:
-            return
-
-        import os
-        import sys
-        import ctypes
-
-        # Find nvidia packages in site-packages
-        nvidia_packages = [
-            "nvidia/cublas/bin",
-            "nvidia/cuda_runtime/bin",
-            "nvidia/cudnn/bin",
-            "nvidia/cufft/bin",
-            "nvidia/curand/bin",
-            "nvidia/cusolver/bin",
-            "nvidia/cusparse/bin",
-            "nvidia/nvjitlink/bin",
-        ]
-
-        added_paths = []
-        for site_dir in sys.path:
-            if "site-packages" in site_dir:
-                for pkg in nvidia_packages:
-                    pkg_path = os.path.join(site_dir, pkg)
-                    if os.path.isdir(pkg_path):
-                        # Add to PATH
-                        if pkg_path not in os.environ.get("PATH", ""):
-                            os.environ["PATH"] = pkg_path + os.pathsep + os.environ.get("PATH", "")
-                        # Also use add_dll_directory for Windows 10+
-                        try:
-                            os.add_dll_directory(pkg_path)
-                        except (AttributeError, OSError):
-                            pass
-                        added_paths.append(pkg_path)
-
-        # Preload critical DLLs via ctypes
-        critical_dlls = ["cufft64_11.dll", "cublas64_12.dll", "cudnn64_9.dll"]
-        loaded = 0
-        for dll_dir in added_paths:
-            for dll in critical_dlls:
-                dll_path = os.path.join(dll_dir, dll)
-                if os.path.exists(dll_path):
-                    try:
-                        ctypes.CDLL(dll_path)
-                        loaded += 1
-                    except OSError:
-                        pass
-
-        if added_paths:
-            print(f"[Parakeet] Added {len(added_paths)} NVIDIA paths, preloaded {loaded} DLLs")
-
-        self._cuda_paths_added = True
 
     def load(self, model_name: str, use_gpu: bool = True) -> bool:
         """Load Parakeet model via onnx-asr."""
         try:
-            # Add NVIDIA pip package DLLs to PATH before importing onnx_asr
+            # Set up CUDA paths before importing onnx_asr
             if use_gpu:
-                self._setup_cuda_paths()
+                setup_cuda_paths()
 
             import onnx_asr
 
