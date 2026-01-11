@@ -29,6 +29,7 @@ def setup_cuda_paths():
     nvidia_packages = [
         "nvidia/cublas/bin",
         "nvidia/cuda_runtime/bin",
+        "nvidia/cuda_nvrtc/bin",
         "nvidia/cudnn/bin",
         "nvidia/cufft/bin",
         "nvidia/curand/bin",
@@ -59,6 +60,7 @@ def setup_cuda_paths():
         "cudnn64_9.dll",
         "cudnn_ops64_9.dll",
         "cufft64_11.dll",
+        "nvrtc64_120_0.dll",
     ]
     loaded = 0
     for dll_dir in added_paths:
@@ -245,25 +247,30 @@ class ParakeetBackend(TranscriptionBackend):
                 setup_cuda_paths()
 
             import onnx_asr
+            import onnxruntime as ort
+
+            # Suppress onnxruntime warnings (Memcpy node warnings)
+            sess_options = ort.SessionOptions()
+            sess_options.log_severity_level = 3  # Error only (suppress warnings)
 
             # Try GPU first, then CPU fallback
             if use_gpu:
                 try:
-                    # Try CUDA - but onnxruntime may fail if CUDA libs missing
                     self._model = onnx_asr.load_model(
                         model_name,
-                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                        sess_options=sess_options
                     )
-                    # Check if CUDA actually loaded (onnxruntime silently falls back)
                     self._using_gpu = True
-                    print(f"[Parakeet] Loaded {model_name} (GPU attempt)")
+                    print(f"[Parakeet] Loaded {model_name} (GPU)")
                 except Exception as e:
                     print(f"[Parakeet] GPU load failed: {e}")
                     print("[Parakeet] Falling back to CPU...")
                     try:
                         self._model = onnx_asr.load_model(
                             model_name,
-                            providers=["CPUExecutionProvider"]
+                            providers=["CPUExecutionProvider"],
+                            sess_options=sess_options
                         )
                         self._using_gpu = False
                     except Exception as cpu_e:
@@ -272,7 +279,8 @@ class ParakeetBackend(TranscriptionBackend):
             else:
                 self._model = onnx_asr.load_model(
                     model_name,
-                    providers=["CPUExecutionProvider"]
+                    providers=["CPUExecutionProvider"],
+                    sess_options=sess_options
                 )
                 self._using_gpu = False
 

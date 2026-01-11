@@ -1314,6 +1314,7 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.3 - Add nvrtc DLL support, suppress onnxruntime warnings")
         print("    v1.8.2 - Shared CUDA path setup fixes cuDNN loading for both backends")
         print("    v1.8.1 - Graceful fallback: Parakeet failure auto-reverts to Whisper")
         print("           - Better error handling for missing CUDA libs")
