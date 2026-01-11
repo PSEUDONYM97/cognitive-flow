@@ -595,6 +595,13 @@ class SystemTray:
             else:
                 self.app.ui.hide()
         print(f"[Settings] Overlay: {'visible' if self.app.show_overlay else 'hidden'}")
+
+    def on_reset_overlay(self, icon, item):
+        """Reset overlay position and visibility - use if indicator goes missing"""
+        if self.app.ui and self.app.ui.indicator:
+            self.app.show_overlay = True
+            self.app.ui.indicator.ensure_visible()
+            print("[Settings] Overlay position reset")
     
     def run(self):
         if not HAS_TRAY:
@@ -607,6 +614,7 @@ class SystemTray:
                 self.on_toggle_overlay,
                 checked=lambda item: self.app.show_overlay if self.app else True
             ),
+            pystray.MenuItem("Reset Overlay Position", self.on_reset_overlay),
             pystray.MenuItem("Quit", self.on_quit)
         )
         
@@ -1285,6 +1293,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.8.5 - Fix disappearing overlay: ensure_visible(), refresh geometry")
+        print("           - Add 'Reset Overlay Position' to system tray menu")
         print("    v1.8.4 - Lazy backend loading: 50x faster startup (~8s -> 0.16s)")
         print("    v1.8.3 - Add nvrtc DLL support, suppress onnxruntime warnings")
         print("    v1.8.2 - Shared CUDA path setup fixes cuDNN loading for both backends")

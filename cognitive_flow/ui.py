@@ -740,14 +740,17 @@ class FloatingIndicator(QWidget):
         # Enable mouse tracking for hover
         self.setMouseTracking(True)
         
-        # Entry animation
+        # Entry animation with fallback to ensure visibility
         self.setWindowOpacity(0)
         self.entry_anim = QPropertyAnimation(self, b"windowOpacity")
         self.entry_anim.setDuration(400)
         self.entry_anim.setStartValue(0)
         self.entry_anim.setEndValue(1)
         self.entry_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.entry_anim.finished.connect(lambda: self.setWindowOpacity(1))  # Ensure opacity
         QTimer.singleShot(100, self.entry_anim.start)
+        # Fallback: force opacity to 1 after animation should have completed
+        QTimer.singleShot(600, lambda: self.setWindowOpacity(1) if self.windowOpacity() < 1 else None)
     
     # Qt Properties
     def get_circle_color(self):
@@ -788,6 +791,27 @@ class FloatingIndicator(QWidget):
         """Keep indicator anchored to bottom-right"""
         x = self._screen_geometry.x() + self._screen_geometry.width() - self._current_width - self._margin
         self.move(x, self._base_y)
+
+    def refresh_geometry(self):
+        """Refresh screen geometry and reposition - call if display config changed"""
+        screen = QGuiApplication.primaryScreen()
+        self._screen_geometry = screen.availableGeometry()
+        self._base_y = self._screen_geometry.y() + self._screen_geometry.height() - self.height() - self._margin
+        self._update_position()
+
+    def ensure_visible(self):
+        """Force the indicator to be visible and properly positioned"""
+        # Refresh screen geometry in case display changed
+        self.refresh_geometry()
+        # Ensure opacity is 1
+        self.setWindowOpacity(1)
+        # Show and raise to top
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        # Force repaint
+        self.update()
+        print(f"[UI] ensure_visible: pos=({self.x()}, {self.y()}) opacity={self.windowOpacity()} visible={self.isVisible()}")
     
     def _collapse(self):
         """Animate to collapsed state"""
@@ -1107,8 +1131,7 @@ class CognitiveFlowUI(QObject):
     def show(self):
         """Show the overlay indicator"""
         if self.indicator:
-            self.indicator.show()
-            self.indicator.update()  # Force repaint to show current state
+            self.indicator.ensure_visible()
     
     def hide(self):
         """Hide the overlay indicator"""
