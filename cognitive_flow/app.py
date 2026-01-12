@@ -101,6 +101,9 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 VK_OEM_3 = 0xC0  # Tilde key
 
+# Wake detection
+WAKE_THRESHOLD_SECONDS = 30  # If loop blocked for 30s+, assume sleep/wake
+
 INPUT_KEYBOARD = 1
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
@@ -950,7 +953,43 @@ class CognitiveFlowApp:
                 self.model_loading = False
 
         threading.Thread(target=_load, daemon=True).start()
-    
+
+    def warmup_gpu(self):
+        """Run a silent warmup transcription to re-initialize GPU after sleep/wake."""
+        if self.model_loading:
+            return  # Already loading
+        if not self.backend or not self.backend.is_loaded:
+            return  # No model loaded
+        if not self.using_gpu:
+            return  # CPU doesn't need warmup
+
+        def _warmup():
+            try:
+                import numpy as np
+                print("[Warmup] Re-initializing GPU after wake...")
+
+                if self.ui:
+                    self.ui.set_state("processing", "Warming up...")
+
+                # Generate 1 second of silence
+                warmup_audio = np.zeros(16000, dtype=np.float32)
+
+                _start = time.perf_counter()
+                self.backend.transcribe(warmup_audio, sample_rate=16000)
+                warmup_time = (time.perf_counter() - _start) * 1000
+
+                print(f"[Warmup] GPU ready in {warmup_time:.0f}ms")
+
+                if self.ui:
+                    self.ui.set_state("idle", "Ready")
+
+            except Exception as e:
+                print(f"[Warmup] Failed: {e}")
+                if self.ui:
+                    self.ui.set_state("idle", "Ready")
+
+        threading.Thread(target=_warmup, daemon=True).start()
+
     def keyboard_callback(self, nCode, wParam, lParam):
         if nCode >= 0:
             kb = lParam.contents
@@ -977,11 +1016,23 @@ class CognitiveFlowApp:
         TranslateMessage = user32.TranslateMessage
         DispatchMessageW = user32.DispatchMessageW
         PM_REMOVE = 0x0001
-        
+
+        last_loop_time = time.time()
+
         while self.running:
+            current_time = time.time()
+
+            # Detect wake from sleep: if loop was blocked for 30+ seconds
+            time_gap = current_time - last_loop_time
+            if time_gap > WAKE_THRESHOLD_SECONDS:
+                print(f"[Wake] Detected system resume (gap: {time_gap:.1f}s)")
+                self.warmup_gpu()
+
+            last_loop_time = current_time
+
             if self.ui and self.ui.qt_app:
                 self.ui.qt_app.processEvents()
-            
+
             if PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                 if msg.message == 0x0012:
                     break
@@ -1318,6 +1369,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.9.0 - GPU warmup on wake: auto-reinitialize after sleep/resume")
+        print("           - Detects system wake and runs silent warmup transcription")
         print("    v1.8.9 - Disable dropdowns during model loading (prevent lockups)")
         print("           - Auto-cleanup corrupted Parakeet downloads on load failure")
         print("    v1.8.8 - Disable scroll wheel on settings dropdowns (prevent accidental changes)")
