@@ -1369,6 +1369,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.9.1 - Fix overlay not appearing until mouse wiggle")
+        print("           - Force Windows compositor refresh with position nudge")
         print("    v1.9.0 - GPU warmup on wake: auto-reinitialize after sleep/resume")
         print("           - Detects system wake and runs silent warmup transcription")
         print("    v1.8.9 - Disable dropdowns during model loading (prevent lockups)")

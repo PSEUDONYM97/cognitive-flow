@@ -843,8 +843,16 @@ class FloatingIndicator(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
-        # Force repaint
-        self.update()
+        # Force immediate repaint (not just scheduled)
+        self.repaint()
+        # Process events to flush the repaint to the compositor
+        QApplication.processEvents()
+        # Nudge position slightly to force Windows compositor refresh
+        current_pos = self.pos()
+        self.move(current_pos.x() + 1, current_pos.y())
+        QApplication.processEvents()
+        self.move(current_pos)
+        QApplication.processEvents()
         print(f"[UI] ensure_visible: pos=({self.x()}, {self.y()}) opacity={self.windowOpacity()} visible={self.isVisible()}")
     
     def _collapse(self):
