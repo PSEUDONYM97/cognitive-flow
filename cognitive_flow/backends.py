@@ -253,12 +253,17 @@ class ParakeetBackend(TranscriptionBackend):
             sess_options = ort.SessionOptions()
             sess_options.log_severity_level = 3  # Error only (suppress warnings)
 
+            # CUDA provider options
+            cuda_options = {
+                'cudnn_conv_algo_search': 'EXHAUSTIVE',  # Find fastest conv algorithms
+            }
+
             # Try GPU first, then CPU fallback
             if use_gpu:
                 try:
                     self._model = onnx_asr.load_model(
                         model_name,
-                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                        providers=[("CUDAExecutionProvider", cuda_options), "CPUExecutionProvider"],
                         sess_options=sess_options
                     )
                     self._using_gpu = True

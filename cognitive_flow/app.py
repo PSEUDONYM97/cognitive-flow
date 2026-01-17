@@ -100,6 +100,7 @@ WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 VK_OEM_3 = 0xC0  # Tilde key
+VK_ESCAPE = 0x1B  # Escape key
 
 # Wake detection
 WAKE_THRESHOLD_SECONDS = 30  # If loop blocked for 30s+, assume sleep/wake
@@ -410,7 +411,14 @@ class TextProcessor:
     }
     
     REPLACEMENTS = {"hashtag": "#", "clod": "CLAUDE"}
-    
+
+    # Filler words to remove (vocal pauses)
+    FILLER_WORDS = {
+        "um", "uh", "uhh", "umm", "ummm", "uhhh",
+        "er", "err", "errr", "ah", "ahh", "ahhh",
+        "hmm", "hmmm", "hmmmm", "mm", "mmm", "mmmm",
+    }
+
     CHAR_NORMALIZE = {
         "'": "'", "'": "'", '"': '"', '"': '"',
         "-": "-", "--": "-", "...": "...",
@@ -449,6 +457,21 @@ class TextProcessor:
         
         return text
     
+    def _remove_filler_words(self, text: str) -> str:
+        """Remove filler words like um, uh, er, etc."""
+        import re
+
+        words = text.split()
+        filtered = []
+
+        for word in words:
+            # Strip punctuation for comparison but keep original
+            clean_word = re.sub(r'[.,!?;:\'"]+$', '', word).lower()
+            if clean_word not in self.FILLER_WORDS:
+                filtered.append(word)
+
+        return ' '.join(filtered)
+
     def _detect_hallucination_loop(self, text: str) -> str | None:
         """Detect and remove Whisper hallucination loops (e.g., 'I'm I'm I'm...' 50 times)"""
         import re
@@ -478,26 +501,29 @@ class TextProcessor:
         loop_fix = self._detect_hallucination_loop(text)
         if loop_fix:
             text = loop_fix
-        
-        # Pass 1: Fix Whisper artifacts (e.g., ",nd" -> "command")
+
+        # Pass 1: Remove filler words (um, uh, er, etc.)
+        text = self._remove_filler_words(text)
+
+        # Pass 2: Fix Whisper artifacts (e.g., ",nd" -> "command")
         text = self._correct_whisper_artifacts(text)
-        
-        # Pass 2: Normalize fancy characters
+
+        # Pass 3: Normalize fancy characters
         for fancy, simple in self.CHAR_NORMALIZE.items():
             text = text.replace(fancy, simple)
-        
-        # Pass 3: Custom word replacements
+
+        # Pass 4: Custom word replacements
         for word, replacement in self.REPLACEMENTS.items():
             pattern = re.compile(re.escape(word), re.IGNORECASE)
             text = pattern.sub(replacement, text)
-        
-        # Pass 4: Convert spoken punctuation to symbols
+
+        # Pass 5: Convert spoken punctuation to symbols
         # Only replace when it's a standalone word
         for spoken, punct in self.PUNCTUATION.items():
             pattern = re.compile(r'\b' + re.escape(spoken) + r'\b', re.IGNORECASE)
             text = pattern.sub(punct, text)
-        
-        # Pass 5: Clean up spacing around punctuation
+
+        # Pass 6: Clean up spacing around punctuation
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         text = re.sub(r'\s+', ' ', text)
         
@@ -751,6 +777,10 @@ class CognitiveFlowApp:
 
         # State reset timer (to prevent race conditions)
         self._state_reset_timer: threading.Timer | None = None
+
+        # Double-escape tracking for cancel
+        self._last_escape_time: float = 0.0
+        self._escape_window: float = 0.5  # 500ms window for double-escape
         
         self.tray: SystemTray | None = None
         if HAS_TRAY:
@@ -997,6 +1027,18 @@ class CognitiveFlowApp:
                 if wParam == WM_KEYDOWN:
                     self.toggle_recording()
                     return 1
+            elif kb.vkCode == VK_ESCAPE:
+                if wParam == WM_KEYDOWN and self.is_recording:
+                    current_time = time.time()
+                    if current_time - self._last_escape_time < self._escape_window:
+                        # Double-escape: cancel recording
+                        self.cancel_recording()
+                        self._last_escape_time = 0.0  # Reset
+                        return 1
+                    else:
+                        # First escape: just note the time
+                        self._last_escape_time = current_time
+                        print("[Record] Press Escape again to cancel")
         return CallNextHookEx(self.hook, nCode, wParam, lParam)
     
     def install_hook(self):
@@ -1115,11 +1157,25 @@ class CognitiveFlowApp:
         
         threading.Thread(target=_record, daemon=True).start()
     
+    def cancel_recording(self):
+        """Cancel recording without transcribing (Escape key)."""
+        self.is_recording = False
+        self.frames = []  # Discard recorded audio
+
+        SoundEffects.play_error()  # Different sound to indicate cancel
+        print("[Record] Cancelled")
+
+        if self.tray:
+            self.tray.update_icon(recording=False)
+        if self.ui:
+            self.ui.set_state("idle", "Cancelled")
+            self._schedule_state_reset(delay=1.0)
+
     def stop_recording(self):
         self.is_recording = False
         time.sleep(0.1)  # Give recording thread time to finish last read
         duration = time.time() - self.record_start_time
-        
+
         SoundEffects.play_stop()
         if self.debug:
             logger.info("Processing", f"{duration:.1f}s of audio...")
@@ -1369,6 +1425,9 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.9.2 - Double-Escape to cancel recording (prevents accidental cancel)")
+        print("           - Remove filler words (um, uh, er, ah, hmm) from transcriptions")
+        print("           - Use EXHAUSTIVE cuDNN algo search for best GPU performance")
         print("    v1.9.1 - Fix overlay not appearing until mouse wiggle")
         print("           - Force Windows compositor refresh with position nudge")
         print("    v1.9.0 - GPU warmup on wake: auto-reinitialize after sleep/resume")
