@@ -4,7 +4,8 @@ Cognitive Flow UI - PyQt6 floating indicator and settings dialog.
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
                               QMenu, QDialog, QPushButton, QComboBox, QSpinBox,
-                              QCheckBox, QScrollArea, QFrame, QGraphicsDropShadowEffect)
+                              QCheckBox, QScrollArea, QFrame, QGraphicsDropShadowEffect,
+                              QLineEdit)
 
 
 from PyQt6.QtCore import (Qt, QPropertyAnimation, QEasingCurve, pyqtProperty,
@@ -277,7 +278,50 @@ class SettingsDialog(QDialog):
         output_layout.addWidget(trailing_space_desc)
         
         scroll_layout.addLayout(output_layout)
-        
+
+        # Text Replacements Section
+        scroll_layout.addWidget(self._create_section_header("Text Replacements"))
+        replacements_layout = QVBoxLayout()
+        replacements_layout.setSpacing(8)
+
+        replacements_desc = QLabel("Words on the left get replaced with words on the right. Remove any you don't want.")
+        replacements_desc.setWordWrap(True)
+        replacements_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        replacements_layout.addWidget(replacements_desc)
+
+        # Add new replacement row
+        add_row = QHBoxLayout()
+        add_row.setSpacing(8)
+
+        self.from_input = QLineEdit()
+        self.from_input.setPlaceholderText("From...")
+        self.from_input.setFixedHeight(32)
+        self.from_input.setObjectName("replacementInput")
+
+        self.to_input = QLineEdit()
+        self.to_input.setPlaceholderText("To...")
+        self.to_input.setFixedHeight(32)
+        self.to_input.setObjectName("replacementInput")
+
+        add_btn = QPushButton("+")
+        add_btn.setFixedSize(32, 32)
+        add_btn.setObjectName("addReplacementBtn")
+        add_btn.clicked.connect(self._on_add_replacement)
+
+        add_row.addWidget(self.from_input, 1)
+        add_row.addWidget(self.to_input, 1)
+        add_row.addWidget(add_btn)
+
+        replacements_layout.addLayout(add_row)
+
+        # Container for all replacements
+        self.replacements_container = QVBoxLayout()
+        self.replacements_container.setSpacing(4)
+        replacements_layout.addLayout(self.replacements_container)
+
+        self._populate_replacements()
+        scroll_layout.addLayout(replacements_layout)
+
         # Statistics Section
         scroll_layout.addWidget(self._create_section_header("Statistics"))
         stats_layout = QVBoxLayout()
@@ -429,6 +473,51 @@ class SettingsDialog(QDialog):
             
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
                 background-color: transparent;
+            }}
+
+            #replacementInput {{
+                background-color: {COLORS['bg_elevated'].name()};
+                border: 1px solid {COLORS['border_subtle'].name()};
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: {COLORS['text_primary'].name()};
+                font-size: 12px;
+            }}
+
+            #replacementInput:focus {{
+                border-color: {COLORS['idle'].name()};
+            }}
+
+            #addReplacementBtn {{
+                background-color: {COLORS['idle'].name()};
+                border: none;
+                border-radius: 6px;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }}
+
+            #addReplacementBtn:hover {{
+                background-color: {COLORS['success'].name()};
+            }}
+
+            #removeReplacementBtn {{
+                background-color: transparent;
+                border: 1px solid {COLORS['border_subtle'].name()};
+                border-radius: 4px;
+                color: {COLORS['text_muted'].name()};
+                font-size: 12px;
+            }}
+
+            #removeReplacementBtn:hover {{
+                background-color: {COLORS['error'].name()};
+                border-color: {COLORS['error'].name()};
+                color: white;
+            }}
+
+            #replacementRow {{
+                background-color: {COLORS['bg_elevated'].name()};
+                border-radius: 6px;
             }}
         """)
         
@@ -642,6 +731,98 @@ class SettingsDialog(QDialog):
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
             print(f"[Settings] Trailing space: {'on' if checked else 'off'}")
+
+    def _populate_replacements(self):
+        """Populate replacements list from config"""
+        # Clear existing items
+        while self.replacements_container.count():
+            item = self.replacements_container.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self.app_ref or not hasattr(self.app_ref, 'text_replacements'):
+            return
+
+        # Show all user replacements
+        for from_text, to_text in self.app_ref.text_replacements.items():
+            row = self._create_replacement_row(from_text, to_text)
+            self.replacements_container.addWidget(row)
+
+    def _create_replacement_row(self, from_text: str, to_text: str) -> QFrame:
+        """Create a row widget showing a single replacement"""
+        row = QFrame()
+        row.setObjectName("replacementRow")
+        row.setFixedHeight(32)
+
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(10, 4, 6, 4)
+        layout.setSpacing(8)
+
+        from_label = QLabel(from_text)
+        from_label.setStyleSheet(f"color: {COLORS['text_primary'].name()}; font-size: 12px;")
+
+        arrow = QLabel("->")
+        arrow.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 12px;")
+
+        to_label = QLabel(to_text)
+        to_label.setStyleSheet(f"color: {COLORS['idle'].name()}; font-size: 12px; font-weight: bold;")
+
+        layout.addWidget(from_label)
+        layout.addWidget(arrow)
+        layout.addWidget(to_label)
+        layout.addStretch()
+
+        remove_btn = QPushButton("x")
+        remove_btn.setFixedSize(24, 24)
+        remove_btn.setObjectName("removeReplacementBtn")
+        remove_btn.clicked.connect(lambda checked, f=from_text: self._on_remove_replacement(f))
+        layout.addWidget(remove_btn)
+
+        return row
+
+    def _on_add_replacement(self):
+        """Handle adding a new replacement"""
+        from_text = self.from_input.text().strip()
+        to_text = self.to_input.text().strip()
+
+        if not from_text or not to_text:
+            return
+
+        if self.app_ref:
+            # Add to config and processor
+            if not hasattr(self.app_ref, 'text_replacements'):
+                self.app_ref.text_replacements = {}
+            self.app_ref.text_replacements[from_text] = to_text
+            self.app_ref.processor.REPLACEMENTS[from_text] = to_text
+
+            # Save config
+            if hasattr(self.app_ref, 'save_config'):
+                self.app_ref.save_config()
+
+            print(f"[Settings] Added replacement: '{from_text}' -> '{to_text}'")
+
+        # Clear inputs and refresh list
+        self.from_input.clear()
+        self.to_input.clear()
+        self._populate_replacements()
+
+    def _on_remove_replacement(self, from_text: str):
+        """Handle removing a replacement"""
+        if not self.app_ref:
+            return
+
+        # Remove from config and processor
+        if from_text in getattr(self.app_ref, 'text_replacements', {}):
+            del self.app_ref.text_replacements[from_text]
+        if from_text in self.app_ref.processor.REPLACEMENTS:
+            del self.app_ref.processor.REPLACEMENTS[from_text]
+
+        # Save config
+        if hasattr(self.app_ref, 'save_config'):
+            self.app_ref.save_config()
+
+        print(f"[Settings] Removed replacement: '{from_text}'")
+        self._populate_replacements()
 
     def _update_loading_state(self):
         """Check if model is loading and enable/disable dropdowns accordingly"""
@@ -1196,9 +1377,9 @@ class CognitiveFlowUI(QObject):
     
     def _show_settings_on_main_thread(self):
         """Actually show settings - called on Qt main thread"""
-        if not self.settings_dialog:
-            self.settings_dialog = SettingsDialog(parent=self.indicator, app_ref=self.app)
-        self.settings_dialog.exec()
+        # Always create fresh dialog (old one may be in bad state after close)
+        dialog = SettingsDialog(parent=self.indicator, app_ref=self.app)
+        dialog.exec()  # PyQt exec, not subprocess
     
     def destroy(self):
         """Clean up"""

@@ -410,7 +410,8 @@ class TextProcessor:
         "new paragraph": "\n\n", "enter": "\n",
     }
     
-    REPLACEMENTS = {"hashtag": "#", "clod": "CLAUDE"}
+    # User-configurable word replacements (loaded from config)
+    REPLACEMENTS = {}
 
     # Filler words to remove (vocal pauses)
     FILLER_WORDS = {
@@ -818,6 +819,7 @@ class CognitiveFlowApp:
         self.input_device_index = None  # None = system default
         self.show_overlay = True  # Show floating indicator
         self.archive_audio = True  # Save audio recordings for future training
+        self.text_replacements = {}  # User's text replacements (from -> to)
 
         if self.config_file.exists():
             try:
@@ -830,8 +832,12 @@ class CognitiveFlowApp:
                     self.input_device_index = config.get('input_device_index', None)
                     self.show_overlay = config.get('show_overlay', True)
                     self.archive_audio = config.get('archive_audio', True)
+                    self.text_replacements = config.get('text_replacements', {})
             except:
                 pass
+
+        # Apply replacements to processor
+        self.processor.REPLACEMENTS = dict(self.text_replacements)
     
     def save_config(self):
         config = {
@@ -842,6 +848,7 @@ class CognitiveFlowApp:
             'input_device_index': self.input_device_index,
             'show_overlay': self.show_overlay,
             'archive_audio': self.archive_audio,
+            'text_replacements': self.text_replacements,
         }
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -1425,6 +1432,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.10.0 - Custom text replacements in Settings")
+        print("            - Add/remove word corrections via UI (no built-in defaults)")
         print("    v1.9.2 - Double-Escape to cancel recording (prevents accidental cancel)")
         print("           - Remove filler words (um, uh, er, ah, hmm) from transcriptions")
         print("           - Use EXHAUSTIVE cuDNN algo search for best GPU performance")
