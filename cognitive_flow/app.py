@@ -566,6 +566,89 @@ class MediaControl:
         except Exception as e:
             print(f"[Media] Failed to send play/pause: {e}")
 
+    @staticmethod
+    def is_audio_playing() -> bool:
+        """Check if any audio is currently playing using Windows Audio Session API.
+
+        Returns True if audio is detected, False otherwise.
+        Falls back to True (assume playing) if detection fails.
+        """
+        try:
+            from ctypes import POINTER, cast, byref
+            from comtypes import CLSCTX_ALL, CoCreateInstance, GUID
+            from comtypes.automation import IUnknown
+
+            # Windows Core Audio GUIDs
+            CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
+            IID_IMMDeviceEnumerator = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
+            IID_IAudioMeterInformation = GUID('{C02216F6-8C67-4B5B-9D00-D008E73E0064}')
+
+            # eRender = 0 (playback devices), eMultimedia = 1
+            eRender = 0
+            eMultimedia = 1
+
+            # Import comtypes interfaces
+            from comtypes import IUnknown, COMMETHOD, HRESULT
+            from ctypes import c_float, c_uint
+            from ctypes.wintypes import DWORD, LPWSTR
+
+            class IMMDevice(IUnknown):
+                _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
+                _methods_ = [
+                    COMMETHOD([], HRESULT, 'Activate',
+                              (['in'], POINTER(GUID), 'iid'),
+                              (['in'], DWORD, 'dwClsCtx'),
+                              (['in'], POINTER(DWORD), 'pActivationParams'),
+                              (['out'], POINTER(POINTER(IUnknown)), 'ppInterface')),
+                ]
+
+            class IMMDeviceEnumerator(IUnknown):
+                _iid_ = IID_IMMDeviceEnumerator
+                _methods_ = [
+                    COMMETHOD([], HRESULT, 'EnumAudioEndpoints',
+                              (['in'], DWORD, 'dataFlow'),
+                              (['in'], DWORD, 'dwStateMask'),
+                              (['out'], POINTER(POINTER(IUnknown)), 'ppDevices')),
+                    COMMETHOD([], HRESULT, 'GetDefaultAudioEndpoint',
+                              (['in'], DWORD, 'dataFlow'),
+                              (['in'], DWORD, 'role'),
+                              (['out'], POINTER(POINTER(IMMDevice)), 'ppDevice')),
+                ]
+
+            class IAudioMeterInformation(IUnknown):
+                _iid_ = IID_IAudioMeterInformation
+                _methods_ = [
+                    COMMETHOD([], HRESULT, 'GetPeakValue',
+                              (['out'], POINTER(c_float), 'pfPeak')),
+                ]
+
+            # Create device enumerator
+            enumerator = CoCreateInstance(
+                CLSID_MMDeviceEnumerator,
+                IMMDeviceEnumerator,
+                CLSCTX_ALL
+            )
+
+            # Get default playback device
+            device = POINTER(IMMDevice)()
+            enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia, byref(device))
+
+            # Activate audio meter
+            meter = POINTER(IUnknown)()
+            device.Activate(byref(IID_IAudioMeterInformation), CLSCTX_ALL, None, byref(meter))
+            audio_meter = meter.QueryInterface(IAudioMeterInformation)
+
+            # Get peak value (0.0 to 1.0)
+            peak = c_float()
+            audio_meter.GetPeakValue(byref(peak))
+
+            # Consider audio "playing" if peak > small threshold
+            return peak.value > 0.001
+
+        except Exception:
+            # If detection fails, assume audio might be playing (safer default)
+            return True
+
 
 class UpdateChecker:
     """Check GitHub for new versions."""
@@ -1228,13 +1311,16 @@ class CognitiveFlowApp:
         self.frames = []
         self.record_start_time = time.time()
 
-        # Pause media if enabled
+        # Pause media if enabled - but only if audio is actually playing
         self._media_was_paused = False
         if self.pause_media:
-            MediaControl.send_play_pause()
-            self._media_was_paused = True
-            if self.debug:
-                print("[Media] Paused")
+            if MediaControl.is_audio_playing():
+                MediaControl.send_play_pause()
+                self._media_was_paused = True
+                if self.debug:
+                    print("[Media] Paused (audio was playing)")
+            elif self.debug:
+                print("[Media] Skipped pause (no audio playing)")
 
         SoundEffects.play_start()
         if self.debug:
@@ -1554,6 +1640,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.13.0 - Fix pause media playing music when already paused")
+        print("            - Now detects if audio is playing before toggling (via Windows Audio API)")
         print("    v1.12.0 - Update checker")
         print("            - Checks GitHub for new versions on startup, notifies if update available")
         print("    v1.11.0 - Pause media during recording")
