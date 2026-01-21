@@ -276,7 +276,39 @@ class SettingsDialog(QDialog):
         trailing_space_desc.setWordWrap(True)
         trailing_space_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
         output_layout.addWidget(trailing_space_desc)
-        
+
+        output_layout.addSpacing(8)
+
+        self.pause_media_cb = QCheckBox("Pause media during recording")
+        self.pause_media_cb.setChecked(
+            self.app_ref.pause_media if self.app_ref and hasattr(self.app_ref, 'pause_media') else False
+        )
+        self.pause_media_cb.setStyleSheet(f"""
+            QCheckBox {{
+                color: {COLORS['text_primary'].name()};
+                font-size: 12px;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid {COLORS['border_strong'].name()};
+                background-color: {COLORS['bg_elevated'].name()};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {COLORS['idle'].name()};
+                border-color: {COLORS['idle'].name()};
+            }}
+        """)
+        self.pause_media_cb.toggled.connect(self._on_pause_media_changed)
+        output_layout.addWidget(self.pause_media_cb)
+
+        pause_media_desc = QLabel("Sends play/pause key when recording starts and stops (works with Spotify, YouTube, etc.)")
+        pause_media_desc.setWordWrap(True)
+        pause_media_desc.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        output_layout.addWidget(pause_media_desc)
+
         scroll_layout.addLayout(output_layout)
 
         # Text Replacements Section
@@ -731,6 +763,14 @@ class SettingsDialog(QDialog):
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
             print(f"[Settings] Trailing space: {'on' if checked else 'off'}")
+
+    def _on_pause_media_changed(self, checked):
+        """Handle pause media toggle"""
+        if self.app_ref:
+            self.app_ref.pause_media = checked
+            if hasattr(self.app_ref, 'save_config'):
+                self.app_ref.save_config()
+            print(f"[Settings] Pause media: {'on' if checked else 'off'}")
 
     def _populate_replacements(self):
         """Populate replacements list from config"""

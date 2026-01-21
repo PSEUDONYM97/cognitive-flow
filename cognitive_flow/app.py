@@ -548,6 +548,25 @@ class SoundEffects:
         winsound.Beep(200, 300)
 
 
+class MediaControl:
+    """Control media playback via Windows media keys."""
+    VK_MEDIA_PLAY_PAUSE = 0xB3
+    KEYEVENTF_EXTENDEDKEY = 0x0001
+    KEYEVENTF_KEYUP = 0x0002
+
+    @staticmethod
+    def send_play_pause():
+        """Send media play/pause key to pause/resume media players."""
+        try:
+            user32 = ctypes.windll.user32
+            # Key down
+            user32.keybd_event(MediaControl.VK_MEDIA_PLAY_PAUSE, 0, MediaControl.KEYEVENTF_EXTENDEDKEY, 0)
+            # Key up
+            user32.keybd_event(MediaControl.VK_MEDIA_PLAY_PAUSE, 0, MediaControl.KEYEVENTF_EXTENDEDKEY | MediaControl.KEYEVENTF_KEYUP, 0)
+        except Exception as e:
+            print(f"[Media] Failed to send play/pause: {e}")
+
+
 class SystemTray:
     def __init__(self, app: "CognitiveFlowApp"):
         self.app = app
@@ -820,6 +839,7 @@ class CognitiveFlowApp:
         self.show_overlay = True  # Show floating indicator
         self.archive_audio = True  # Save audio recordings for future training
         self.text_replacements = {}  # User's text replacements (from -> to)
+        self.pause_media = False  # Pause media playback during recording
 
         if self.config_file.exists():
             try:
@@ -833,6 +853,7 @@ class CognitiveFlowApp:
                     self.show_overlay = config.get('show_overlay', True)
                     self.archive_audio = config.get('archive_audio', True)
                     self.text_replacements = config.get('text_replacements', {})
+                    self.pause_media = config.get('pause_media', False)
             except:
                 pass
 
@@ -849,6 +870,7 @@ class CognitiveFlowApp:
             'show_overlay': self.show_overlay,
             'archive_audio': self.archive_audio,
             'text_replacements': self.text_replacements,
+            'pause_media': self.pause_media,
         }
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -1128,6 +1150,14 @@ class CognitiveFlowApp:
         self.frames = []
         self.record_start_time = time.time()
 
+        # Pause media if enabled
+        self._media_was_paused = False
+        if self.pause_media:
+            MediaControl.send_play_pause()
+            self._media_was_paused = True
+            if self.debug:
+                print("[Media] Paused")
+
         SoundEffects.play_start()
         if self.debug:
             logger.info("Record", "Listening...")
@@ -1169,6 +1199,13 @@ class CognitiveFlowApp:
         self.is_recording = False
         self.frames = []  # Discard recorded audio
 
+        # Resume media if we paused it
+        if getattr(self, '_media_was_paused', False):
+            MediaControl.send_play_pause()
+            self._media_was_paused = False
+            if self.debug:
+                print("[Media] Resumed")
+
         SoundEffects.play_error()  # Different sound to indicate cancel
         print("[Record] Cancelled")
 
@@ -1182,6 +1219,13 @@ class CognitiveFlowApp:
         self.is_recording = False
         time.sleep(0.1)  # Give recording thread time to finish last read
         duration = time.time() - self.record_start_time
+
+        # Resume media if we paused it
+        if getattr(self, '_media_was_paused', False):
+            MediaControl.send_play_pause()
+            self._media_was_paused = False
+            if self.debug:
+                print("[Media] Resumed")
 
         SoundEffects.play_stop()
         if self.debug:
@@ -1432,6 +1476,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.11.0 - Pause media during recording")
+        print("            - Toggle in Settings to auto-pause Spotify/YouTube/etc while recording")
         print("    v1.10.0 - Custom text replacements in Settings")
         print("            - Add/remove word corrections via UI (no built-in defaults)")
         print("    v1.9.2 - Double-Escape to cancel recording (prevents accidental cancel)")
