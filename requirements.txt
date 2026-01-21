@@ -17,7 +17,7 @@ pillow>=10.0.0
 numpy>=1.24.0
 pyperclip>=1.8.0
 soundfile>=0.12.0  # FLAC audio archiving for training data
-comtypes>=1.2.0    # Windows COM for audio detection (pause media feature)
+pycaw>=20230407    # Windows audio session detection (pause media feature)
 
 # GPU Support (optional but recommended for speed)
 # These provide CUDA libraries for GPU acceleration
