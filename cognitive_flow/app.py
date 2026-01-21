@@ -638,16 +638,23 @@ class MediaControl:
             device.Activate(byref(IID_IAudioMeterInformation), CLSCTX_ALL, None, byref(meter))
             audio_meter = meter.QueryInterface(IAudioMeterInformation)
 
-            # Get peak value (0.0 to 1.0)
-            peak = c_float()
-            audio_meter.GetPeakValue(byref(peak))
+            # Sample peak value multiple times to catch actual music vs background noise
+            # Music has consistent peaks; silence/noise is near-zero
+            import time as _time
+            max_peak = 0.0
+            for _ in range(5):
+                peak = c_float()
+                audio_meter.GetPeakValue(byref(peak))
+                max_peak = max(max_peak, peak.value)
+                _time.sleep(0.02)  # 20ms between samples, 100ms total
 
-            # Consider audio "playing" if peak > small threshold
-            return peak.value > 0.001
+            # Threshold of 0.02 filters out background noise but catches actual music
+            # Music typically peaks at 0.1-0.5+, silence/noise is <0.01
+            return max_peak > 0.02
 
         except Exception:
-            # If detection fails, assume audio might be playing (safer default)
-            return True
+            # If detection fails, assume audio is NOT playing (safer - won't accidentally play music)
+            return False
 
 
 class UpdateChecker:
@@ -1640,6 +1647,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.13.1 - Fix audio detection threshold (was too sensitive)")
+        print("            - Samples 5x over 100ms, threshold 0.02 filters noise vs actual music")
         print("    v1.13.0 - Fix pause media playing music when already paused")
         print("            - Now detects if audio is playing before toggling (via Windows Audio API)")
         print("    v1.12.0 - Update checker")
