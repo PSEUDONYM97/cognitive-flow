@@ -590,9 +590,7 @@ class MediaControl:
         Checks both session state AND audio meter to detect paused vs playing.
         """
         try:
-            from pycaw.pycaw import AudioUtilities
-            from pycaw.pycaw import IAudioMeterInformation
-            from ctypes import cast, POINTER, c_float, byref
+            from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 
             # Get all audio sessions
             sessions = AudioUtilities.GetAllSessions()
@@ -606,10 +604,9 @@ class MediaControl:
                         # Even if session is "active", audio might be paused (no output)
                         try:
                             meter = session._ctl.QueryInterface(IAudioMeterInformation)
-                            peak = c_float()
-                            meter.GetPeakValue(byref(peak))
+                            peak = meter.GetPeakValue()  # pycaw returns float directly
                             # If there's actual audio output, it's playing
-                            if peak.value > 0.001:
+                            if peak > 0.001:
                                 return True
                         except Exception:
                             # Can't check meter, skip this session
@@ -1614,9 +1611,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
-        print("    v1.13.4 - Check audio meter per-session to detect paused vs playing")
-        print("            - Session 'active' state doesn't mean playing (Spotify paused is still active)")
-        print("            - Now checks actual audio output level for each media player session")
+        print("    v1.13.5 - Fix pycaw GetPeakValue API call (returns float directly)")
+        print("            - Was using wrong ctypes signature, now uses pycaw's native API")
         print("    v1.13.0 - Fix pause media playing music when already paused")
         print("            - Now detects if audio is playing before toggling (via Windows Audio API)")
         print("    v1.12.0 - Update checker")
