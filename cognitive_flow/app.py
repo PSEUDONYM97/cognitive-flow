@@ -584,34 +584,43 @@ class MediaControl:
 
     @staticmethod
     def is_audio_playing() -> bool:
-        """Check if any MEDIA PLAYER is actively playing using pycaw.
+        """Check if any MEDIA PLAYER is actively outputting audio using pycaw.
 
-        Returns True if a known media player is outputting audio, False otherwise.
-        Ignores games and other non-media apps that don't respond to media keys.
+        Returns True if a known media player is actually playing (not paused).
+        Checks both session state AND audio meter to detect paused vs playing.
         """
         try:
             from pycaw.pycaw import AudioUtilities
+            from pycaw.pycaw import IAudioMeterInformation
+            from ctypes import cast, POINTER, c_float, byref
 
             # Get all audio sessions
             sessions = AudioUtilities.GetAllSessions()
 
             for session in sessions:
-                # State 1 = AudioSessionStateActive (actually playing audio)
-                if session.State == 1:
-                    # Check if it's a known media player
-                    if session.Process:
-                        process_name = session.Process.name().lower()
-                        if process_name in MediaControl.MEDIA_PLAYERS:
-                            return True
+                # Check if it's a known media player with an active session
+                if session.State == 1 and session.Process:
+                    process_name = session.Process.name().lower()
+                    if process_name in MediaControl.MEDIA_PLAYERS:
+                        # Check the audio meter for THIS specific session
+                        # Even if session is "active", audio might be paused (no output)
+                        try:
+                            meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                            peak = c_float()
+                            meter.GetPeakValue(byref(peak))
+                            # If there's actual audio output, it's playing
+                            if peak.value > 0.001:
+                                return True
+                        except Exception:
+                            # Can't check meter, skip this session
+                            pass
 
             return False
 
         except ImportError:
-            # pycaw not installed - fall back to assuming no audio
             print("[Media] pycaw not installed - install with: pip install pycaw")
             return False
         except Exception:
-            # If detection fails, assume audio is NOT playing (safer)
             return False
 
 
@@ -1605,9 +1614,9 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
-        print("    v1.13.3 - Only detect media players, ignore games")
-        print("            - Filters by known media apps (Spotify, browsers, VLC, etc.)")
-        print("            - Games won't trigger pause since they don't respond to media keys")
+        print("    v1.13.4 - Check audio meter per-session to detect paused vs playing")
+        print("            - Session 'active' state doesn't mean playing (Spotify paused is still active)")
+        print("            - Now checks actual audio output level for each media player session")
         print("    v1.13.0 - Fix pause media playing music when already paused")
         print("            - Now detects if audio is playing before toggling (via Windows Audio API)")
         print("    v1.12.0 - Update checker")
