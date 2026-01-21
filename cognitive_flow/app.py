@@ -567,6 +567,84 @@ class MediaControl:
             print(f"[Media] Failed to send play/pause: {e}")
 
 
+class UpdateChecker:
+    """Check GitHub for new versions."""
+    GITHUB_REPO = "PSEUDONYM97/cognitive-flow"
+    RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    TAGS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/tags"
+
+    @staticmethod
+    def parse_version(version_str: str) -> tuple:
+        """Parse version string like '1.11.0' into tuple (1, 11, 0)."""
+        # Strip 'v' prefix if present
+        version_str = version_str.lstrip('v')
+        try:
+            parts = version_str.split('.')
+            return tuple(int(p) for p in parts)
+        except (ValueError, AttributeError):
+            return (0, 0, 0)
+
+    @staticmethod
+    def check_for_update(current_version: str) -> dict | None:
+        """
+        Check GitHub for newer version.
+        Returns dict with 'version' and 'url' if update available, None otherwise.
+        """
+        import urllib.request
+        import urllib.error
+
+        try:
+            # Try releases first (preferred)
+            req = urllib.request.Request(
+                UpdateChecker.RELEASES_URL,
+                headers={'User-Agent': 'CognitiveFlow-UpdateChecker'}
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode())
+                latest_version = data.get('tag_name', '').lstrip('v')
+                html_url = data.get('html_url', f'https://github.com/{UpdateChecker.GITHUB_REPO}')
+
+                if UpdateChecker.parse_version(latest_version) > UpdateChecker.parse_version(current_version):
+                    return {'version': latest_version, 'url': html_url}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # No releases yet, try tags
+                try:
+                    req = urllib.request.Request(
+                        UpdateChecker.TAGS_URL,
+                        headers={'User-Agent': 'CognitiveFlow-UpdateChecker'}
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        tags = json.loads(response.read().decode())
+                        if tags:
+                            latest_tag = tags[0].get('name', '').lstrip('v')
+                            if UpdateChecker.parse_version(latest_tag) > UpdateChecker.parse_version(current_version):
+                                return {
+                                    'version': latest_tag,
+                                    'url': f'https://github.com/{UpdateChecker.GITHUB_REPO}'
+                                }
+                except Exception:
+                    pass
+        except Exception:
+            # Network error, timeout, etc - silently ignore
+            pass
+
+        return None
+
+    @staticmethod
+    def check_async(current_version: str, callback=None):
+        """Check for updates in background thread."""
+        def _check():
+            result = UpdateChecker.check_for_update(current_version)
+            if result and callback:
+                callback(result)
+            elif result:
+                print(f"[Update] New version available: v{result['version']}")
+                print(f"[Update] Download: {result['url']}")
+
+        threading.Thread(target=_check, daemon=True).start()
+
+
 class SystemTray:
     def __init__(self, app: "CognitiveFlowApp"):
         self.app = app
@@ -1476,6 +1554,8 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
+        print("    v1.12.0 - Update checker")
+        print("            - Checks GitHub for new versions on startup, notifies if update available")
         print("    v1.11.0 - Pause media during recording")
         print("            - Toggle in Settings to auto-pause Spotify/YouTube/etc while recording")
         print("    v1.10.0 - Custom text replacements in Settings")
@@ -1528,9 +1608,12 @@ def main():
     
     # Now load all the heavy libraries
     init_app(debug=args.debug)
-    
+
     app = CognitiveFlowApp(debug=args.debug)
-    
+
+    # Check for updates in background
+    UpdateChecker.check_async(__version__)
+
     def handle_sigint(sig, frame):
         print("\n[Exit] Ctrl+C received...")
         app.running = False
