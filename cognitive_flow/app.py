@@ -566,12 +566,28 @@ class MediaControl:
         except Exception as e:
             print(f"[Media] Failed to send play/pause: {e}")
 
+    # Media players that respond to play/pause media keys
+    # Games and other audio apps won't respond, so we ignore them
+    MEDIA_PLAYERS = {
+        # Streaming services
+        'spotify.exe', 'music.ui.exe',  # Spotify, Windows Media Player
+        'itunes.exe', 'apple music.exe',
+        # Browsers (YouTube, YouTube Music, web players)
+        'chrome.exe', 'firefox.exe', 'msedge.exe', 'opera.exe', 'brave.exe',
+        'vivaldi.exe', 'chromium.exe',
+        # Media players
+        'vlc.exe', 'wmplayer.exe', 'foobar2000.exe', 'winamp.exe',
+        'musicbee.exe', 'aimp.exe', 'mediamonkey.exe',
+        # Podcast/audiobook apps
+        'audible.exe', 'pocketcasts.exe',
+    }
+
     @staticmethod
     def is_audio_playing() -> bool:
-        """Check if any audio session is actively playing using pycaw.
+        """Check if any MEDIA PLAYER is actively playing using pycaw.
 
-        Returns True if any app is actively outputting audio, False otherwise.
-        This checks session STATE (playing/paused), not audio levels.
+        Returns True if a known media player is outputting audio, False otherwise.
+        Ignores games and other non-media apps that don't respond to media keys.
         """
         try:
             from pycaw.pycaw import AudioUtilities
@@ -581,10 +597,12 @@ class MediaControl:
 
             for session in sessions:
                 # State 1 = AudioSessionStateActive (actually playing audio)
-                # State 0 = AudioSessionStateInactive (open but not playing)
-                # State 2 = AudioSessionStateExpired
                 if session.State == 1:
-                    return True
+                    # Check if it's a known media player
+                    if session.Process:
+                        process_name = session.Process.name().lower()
+                        if process_name in MediaControl.MEDIA_PLAYERS:
+                            return True
 
             return False
 
@@ -1587,8 +1605,9 @@ def main():
         print("=" * 60)
         print()
         print("  CHANGELOG:")
-        print("    v1.13.2 - Use pycaw for reliable audio session state detection")
-        print("            - Checks actual session state (playing/paused) instead of audio levels")
+        print("    v1.13.3 - Only detect media players, ignore games")
+        print("            - Filters by known media apps (Spotify, browsers, VLC, etc.)")
+        print("            - Games won't trigger pause since they don't respond to media keys")
         print("    v1.13.0 - Fix pause media playing music when already paused")
         print("            - Now detects if audio is playing before toggling (via Windows Audio API)")
         print("    v1.12.0 - Update checker")
