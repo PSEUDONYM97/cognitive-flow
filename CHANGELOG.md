@@ -121,3 +121,9 @@ All notable changes to Cognitive Flow are documented here.
 - Fix pycaw per-session audio meter detection
 - Checks actual audio output from known media players only
 - Ignores games and other non-media apps
+
+## v1.14.0
+- Interactive update prompt in debug mode
+- Prominent "UPDATE AVAILABLE" banner with version comparison
+- One-key update: press Y to run git pull automatically
+- Exits after update so you can restart with new version

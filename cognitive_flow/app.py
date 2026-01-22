@@ -686,8 +686,63 @@ class UpdateChecker:
         return None
 
     @staticmethod
+    def check_and_prompt(current_version: str) -> bool:
+        """Check for updates and prompt user to install.
+
+        Returns True if update was installed, False otherwise.
+        """
+        import subprocess
+
+        result = UpdateChecker.check_for_update(current_version)
+        if not result:
+            return False
+
+        # Prominent update notification
+        print()
+        print("=" * 60)
+        print("  UPDATE AVAILABLE")
+        print("=" * 60)
+        print(f"  Current version: v{current_version}")
+        print(f"  New version:     v{result['version']}")
+        print("=" * 60)
+        print()
+
+        # Ask user
+        response = input("  Would you like to update now? [Y/n]: ").strip().lower()
+
+        if response in ('', 'y', 'yes'):
+            print()
+            print("  Updating...")
+            try:
+                # Run git pull
+                pull_result = subprocess.run(
+                    ['git', 'pull'],
+                    capture_output=True,
+                    text=True,
+                    cwd=Path(__file__).parent.parent
+                )
+                if pull_result.returncode == 0:
+                    print("  Git pull successful!")
+                    print()
+                    print("=" * 60)
+                    print("  UPDATE COMPLETE - Please restart the application")
+                    print("=" * 60)
+                    print()
+                    return True
+                else:
+                    print(f"  Git pull failed: {pull_result.stderr}")
+            except Exception as e:
+                print(f"  Update failed: {e}")
+                print(f"  Run manually: git pull")
+        else:
+            print("  Skipping update.")
+
+        print()
+        return False
+
+    @staticmethod
     def check_async(current_version: str, callback=None):
-        """Check for updates in background thread."""
+        """Check for updates in background thread (non-interactive)."""
         def _check():
             result = UpdateChecker.check_for_update(current_version)
             if result and callback:
@@ -1642,13 +1697,21 @@ def main():
         print()
         print("=" * 60)
     
+    # Check for updates (interactive in debug mode, background otherwise)
+    if args.debug:
+        if UpdateChecker.check_and_prompt(__version__):
+            # Update was installed, exit so user can restart
+            import sys
+            sys.exit(0)
+
     # Now load all the heavy libraries
     init_app(debug=args.debug)
 
     app = CognitiveFlowApp(debug=args.debug)
 
-    # Check for updates in background
-    UpdateChecker.check_async(__version__)
+    # Background update check for non-debug mode (just notify, no prompt)
+    if not args.debug:
+        UpdateChecker.check_async(__version__)
 
     def handle_sigint(sig, frame):
         print("\n[Exit] Ctrl+C received...")
