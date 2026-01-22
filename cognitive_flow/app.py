@@ -189,31 +189,14 @@ class Statistics:
         if self.stats_file.exists():
             with open(self.stats_file, 'r') as f:
                 return json.load(f)
-        
-        # Try to import from WhisperTyping
-        wt_stats = Path(os.environ.get('LOCALAPPDATA', '')) / "WhisperTyping" / "statistics.json"
-        if wt_stats.exists():
-            print(f"[Stats] Importing from WhisperTyping...")
-            with open(wt_stats, 'r') as f:
-                imported = json.load(f)
-            stats = {
-                "total_seconds": imported.get("TotalSeconds", 0),
-                "total_records": imported.get("TotalRecords", 0),
-                "total_words": imported.get("TranscriptionWords", 0),
-                "total_characters": imported.get("TranscriptionCharacters", 0),
-                "last_used": imported.get("LastTranscriptionTime", ""),
-                "imported_from_whispertyping": True
-            }
-            self._save(stats)
-            return stats
-        
+
+        # Start fresh - no importing from other apps
         return {
             "total_seconds": 0,
             "total_records": 0,
             "total_words": 0,
             "total_characters": 0,
             "last_used": "",
-            "imported_from_whispertyping": False,
             "total_processing_time": 0,
             "session_stats": {"records": 0, "words": 0, "characters": 0, "processing_time": 0},
             "performance_history": []

@@ -127,3 +127,7 @@ All notable changes to Cognitive Flow are documented here.
 - Prominent "UPDATE AVAILABLE" banner with version comparison
 - One-key update: press Y to run git pull automatically
 - Exits after update so you can restart with new version
+
+## v1.14.1
+- Remove WhisperTyping stats import (new installs start fresh at zero)
+- Document release tagging process in CLAUDE.md

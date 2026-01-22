@@ -33,7 +33,7 @@ python -m cognitive_flow.warmup --uninstall
 
 **Every feature/fix MUST update:**
 1. `cognitive_flow/__init__.py` - bump `__version__`
-2. `cognitive_flow/app.py` - add changelog entry in `main()` banner
+2. `CHANGELOG.md` - add entry for the new version
 3. Commit message references the version
 
 Format: `MAJOR.MINOR.PATCH` (patch=bugfix, minor=feature, major=breaking)
@@ -105,3 +105,14 @@ GPU (optional): nvidia-cudnn-cu12, nvidia-cublas-cu12
 - Create feature branch for changes
 - Merge to main when complete
 - Push after merge
+
+## Release Process
+
+**After merging a new version to main, create a git tag for the update checker:**
+
+```cmd
+git tag v1.X.X
+git push origin v1.X.X
+```
+
+The update checker looks for GitHub tags to detect new versions. Without tags, users won't be notified of updates.
