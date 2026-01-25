@@ -131,3 +131,7 @@ All notable changes to Cognitive Flow are documented here.
 ## v1.14.1
 - Remove WhisperTyping stats import (new installs start fresh at zero)
 - Document release tagging process in CLAUDE.md
+
+## v1.14.2
+- Use word boundaries for text replacements (prevents partial word matches)
+- "claw.md" won't match inside "globalclaw.md" anymore

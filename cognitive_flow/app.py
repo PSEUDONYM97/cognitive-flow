@@ -496,9 +496,10 @@ class TextProcessor:
         for fancy, simple in self.CHAR_NORMALIZE.items():
             text = text.replace(fancy, simple)
 
-        # Pass 4: Custom word replacements
+        # Pass 4: Custom word replacements (word boundaries to avoid partial matches)
         for word, replacement in self.REPLACEMENTS.items():
-            pattern = re.compile(re.escape(word), re.IGNORECASE)
+            # Use word boundaries so "claw.md" doesn't match inside "globalclaw.md"
+            pattern = re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE)
             text = pattern.sub(replacement, text)
 
         # Pass 5: Convert spoken punctuation to symbols
