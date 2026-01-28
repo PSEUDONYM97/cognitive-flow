@@ -135,3 +135,9 @@ All notable changes to Cognitive Flow are documented here.
 ## v1.14.2
 - Use word boundaries for text replacements (prevents partial word matches)
 - "claw.md" won't match inside "globalclaw.md" anymore
+
+## v1.15.0
+- Audio level indicator while recording
+- Visual feedback bar shows microphone input level in real-time
+- Color changes: amber (quiet), green (good), red (loud)
+- Prevents surprise "no audio" after long recordings

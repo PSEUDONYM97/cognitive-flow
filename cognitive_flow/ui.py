@@ -928,7 +928,8 @@ class FloatingIndicator(QWidget):
         self._is_hovered = False
         self._is_collapsed = False
         self._current_width = self.EXPANDED_WIDTH
-        
+        self._audio_level = 0.0  # 0.0 to 1.0
+
         # Animatable properties
         self._circle_color = QColor(COLORS["processing"])
         self._text_color = QColor(COLORS["text_secondary"])
@@ -1189,7 +1190,31 @@ class FloatingIndicator(QWidget):
             int(dot_radius * 2),
             int(dot_radius * 2)
         )
-    
+
+        # Audio level indicator (only during recording)
+        if self.state == "recording" and self._audio_level > 0:
+            bar_x = dot_x + dot_radius + 6
+            bar_y = dot_y - 3
+            bar_max_width = 24
+            bar_height = 6
+            bar_width = int(bar_max_width * self._audio_level)
+
+            # Background track
+            track_color = QColor(255, 255, 255, 30)
+            painter.setBrush(track_color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(bar_x, bar_y, bar_max_width, bar_height, 2, 2)
+
+            # Filled level (color based on level)
+            if self._audio_level > 0.8:
+                level_color = COLORS["recording"]  # Red for loud
+            elif self._audio_level > 0.4:
+                level_color = COLORS["success"]  # Green for good
+            else:
+                level_color = COLORS["processing"]  # Amber for quiet
+            painter.setBrush(level_color)
+            painter.drawRoundedRect(bar_x, bar_y, bar_width, bar_height, 2, 2)
+
     def set_state(self, state: str, status_text: str | None = None):
         """Update state with smooth transitions"""
         self.state = state
@@ -1246,7 +1271,12 @@ class FloatingIndicator(QWidget):
         elif state == "idle":
             # Start collapse timer when idle
             self._start_collapse_timer()
-    
+
+    def set_audio_level(self, level: float):
+        """Update audio level for visual feedback (0.0 to 1.0)"""
+        self._audio_level = max(0.0, min(1.0, level))
+        self.update()  # Trigger repaint
+
     def show_context_menu(self, position):
         """Context menu"""
         menu = QMenu(self)
@@ -1345,8 +1375,9 @@ class FloatingIndicator(QWidget):
 
 class CognitiveFlowUI(QObject):
     """UI coordinator"""
-    
+
     state_changed = pyqtSignal(str, str)
+    audio_level_changed = pyqtSignal(float)  # 0.0 to 1.0
     show_settings_signal = pyqtSignal()
     
     def __init__(self, app):
@@ -1364,6 +1395,7 @@ class CognitiveFlowUI(QObject):
         
         # Use QueuedConnection to ensure UI updates happen on Qt main thread
         self.state_changed.connect(self._update_indicator_state, Qt.ConnectionType.QueuedConnection)
+        self.audio_level_changed.connect(self._update_audio_level, Qt.ConnectionType.QueuedConnection)
         self.show_settings_signal.connect(self._show_settings_on_main_thread, Qt.ConnectionType.QueuedConnection)
     
     def start(self):
@@ -1380,7 +1412,16 @@ class CognitiveFlowUI(QObject):
         """Thread-safe state update"""
         if self.indicator:
             self.indicator.set_state(state, status_text if status_text else None)
-    
+
+    def _update_audio_level(self, level: float):
+        """Thread-safe audio level update"""
+        if self.indicator:
+            self.indicator.set_audio_level(level)
+
+    def set_audio_level(self, level: float):
+        """Update audio level meter (0.0 to 1.0)"""
+        self.audio_level_changed.emit(level)
+
     def set_state(self, state: str, status_text: str | None = None):
         """Update state"""
         if status_text is None:

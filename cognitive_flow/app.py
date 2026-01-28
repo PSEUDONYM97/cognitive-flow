@@ -1342,6 +1342,8 @@ class CognitiveFlowApp:
             self.ui.set_state("recording", "Recording...")
         
         def _record():
+            import numpy as np
+
             # Use selected input device or system default
             stream_kwargs = {
                 'format': self.FORMAT,
@@ -1352,20 +1354,36 @@ class CognitiveFlowApp:
             }
             if self.input_device_index is not None:
                 stream_kwargs['input_device_index'] = self.input_device_index
-            
+
             stream = self.audio.open(**stream_kwargs)
-            
+
             while self.is_recording:
                 try:
                     data = stream.read(self.CHUNK, exception_on_overflow=False)
                     self.frames.append(data)
+
+                    # Calculate audio level (RMS) and send to UI
+                    if self.ui:
+                        audio_chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                        rms = np.sqrt(np.mean(audio_chunk ** 2))
+                        # Normalize to 0-1 range (16-bit audio max is 32768)
+                        # Use log scale for better visual response
+                        if rms > 0:
+                            level = min(1.0, max(0.0, (np.log10(rms / 32768.0) + 4) / 4))
+                        else:
+                            level = 0.0
+                        self.ui.set_audio_level(level)
                 except Exception as e:
                     print(f"[Error] Recording: {e}")
                     break
-            
+
             stream.stop_stream()
             stream.close()
-        
+
+            # Reset audio level when recording stops
+            if self.ui:
+                self.ui.set_audio_level(0.0)
+
         threading.Thread(target=_record, daemon=True).start()
     
     def cancel_recording(self):
