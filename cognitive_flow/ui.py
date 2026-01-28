@@ -1191,19 +1191,13 @@ class FloatingIndicator(QWidget):
             int(dot_radius * 2)
         )
 
-        # Audio level indicator (only during recording)
+        # Audio level indicator (only during recording) - thin bar at bottom
         if self.state == "recording" and self._audio_level > 0:
-            bar_x = dot_x + dot_radius + 6
-            bar_y = dot_y - 3
-            bar_max_width = 24
-            bar_height = 6
+            bar_height = 3
+            bar_margin = 8
+            bar_y = self.height() - bar_height - 4
+            bar_max_width = self.width() - (bar_margin * 2)
             bar_width = int(bar_max_width * self._audio_level)
-
-            # Background track
-            track_color = QColor(255, 255, 255, 30)
-            painter.setBrush(track_color)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(bar_x, bar_y, bar_max_width, bar_height, 2, 2)
 
             # Filled level (color based on level)
             if self._audio_level > 0.8:
@@ -1213,7 +1207,8 @@ class FloatingIndicator(QWidget):
             else:
                 level_color = COLORS["processing"]  # Amber for quiet
             painter.setBrush(level_color)
-            painter.drawRoundedRect(bar_x, bar_y, bar_width, bar_height, 2, 2)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(bar_margin, bar_y, bar_width, bar_height, 1, 1)
 
     def set_state(self, state: str, status_text: str | None = None):
         """Update state with smooth transitions"""
