@@ -892,6 +892,59 @@ class VirtualKeyboard:
         return ''.join(c for c in text if (32 <= ord(c) <= 126) or c in '\n\t' or (192 <= ord(c) <= 255))
     
     @staticmethod
+    def copy_to_clipboard(text: str):
+        """Copy text to Windows clipboard. Tries Win32 API, falls back to PyQt6."""
+        try:
+            VirtualKeyboard._clipboard_win32(text)
+        except Exception as e:
+            print(f"[Clipboard] Win32 failed ({e}), trying PyQt6 fallback...")
+            try:
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    app.clipboard().setText(text)
+                else:
+                    raise RuntimeError("No QApplication")
+            except Exception as e2:
+                print(f"[Clipboard] All methods failed: {e2}")
+
+    @staticmethod
+    def _clipboard_win32(text: str):
+        """Copy text via Win32 clipboard API (works from any thread, any length)."""
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0002
+
+        _user32 = ctypes.windll.user32
+        _kernel32 = ctypes.windll.kernel32
+
+        # Declare types for 64-bit Windows (default c_int truncates pointers)
+        _kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        _kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        _kernel32.GlobalLock.restype = ctypes.c_void_p
+        _kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        _kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        _user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+        text_bytes = (text + '\0').encode('utf-16-le')
+
+        if not _user32.OpenClipboard(0):
+            raise RuntimeError("OpenClipboard failed")
+
+        try:
+            _user32.EmptyClipboard()
+            h_mem = _kernel32.GlobalAlloc(GMEM_MOVEABLE, len(text_bytes))
+            if not h_mem:
+                raise RuntimeError("GlobalAlloc failed")
+            p_mem = _kernel32.GlobalLock(h_mem)
+            if not p_mem:
+                raise RuntimeError("GlobalLock failed")
+            ctypes.memmove(p_mem, text_bytes, len(text_bytes))
+            _kernel32.GlobalUnlock(h_mem)
+            _user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+        finally:
+            _user32.CloseClipboard()
+
+    @staticmethod
     def type_text(text: str):
         """Type text by posting WM_CHAR messages directly to the focused control.
         
@@ -965,6 +1018,9 @@ class CognitiveFlowApp:
         self.last_audio = None
         self.last_duration = 0.0
         self.last_audio_file: str | None = None
+
+        # Clipboard mode: when recording triggered by indicator click
+        self._clipboard_mode = False
 
         # State reset timer (to prevent race conditions)
         self._state_reset_timer: threading.Timer | None = None
@@ -1283,17 +1339,18 @@ class CognitiveFlowApp:
             else:
                 time.sleep(0.001)
     
-    def toggle_recording(self):
+    def toggle_recording(self, clipboard_mode=False):
         if self.model_loading:
             logger.warning("Record", "Model still loading...")
             return
-        
+
         if not self.model:
             logger.error("Record", "Model not loaded")
             SoundEffects.play_error()
             return
-        
+
         if not self.is_recording:
+            self._clipboard_mode = clipboard_mode
             self.start_recording()
         else:
             self.stop_recording()
@@ -1390,6 +1447,7 @@ class CognitiveFlowApp:
         """Cancel recording without transcribing (Escape key)."""
         self.is_recording = False
         self.frames = []  # Discard recorded audio
+        self._clipboard_mode = False
 
         # Resume media if we paused it
         if getattr(self, '_media_was_paused', False):
@@ -1488,41 +1546,47 @@ class CognitiveFlowApp:
                 
                 if processed_text:
                     _start = _t()
-                    # Add trailing space if enabled (helps separate consecutive transcriptions)
-                    output_text = processed_text + " " if self.add_trailing_space else processed_text
-                    VirtualKeyboard.type_text(output_text)
+                    if self._clipboard_mode:
+                        # Clipboard mode (triggered by indicator click)
+                        VirtualKeyboard.copy_to_clipboard(processed_text)
+                    else:
+                        # Type mode (triggered by hotkey)
+                        output_text = processed_text + " " if self.add_trailing_space else processed_text
+                        VirtualKeyboard.type_text(output_text)
                     _timings['typing'] = (_t() - _start) * 1000
-                    
+
                     total_pipeline = (_t() - pipeline_start) * 1000  # ms
                     _timings['total'] = total_pipeline
-                    
+
                     self.stats.record(duration, processed_text, total_pipeline / 1000)
-                    
+
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration, self.last_audio_file)
-                    
+
                     # Log to file for debugging terminal breaks (debug mode only)
                     if self.debug:
                         logger.log_transcription(raw_text, processed_text, duration, _timings)
-                    
+
                     # Rich logging
                     words = len(processed_text.split())
                     chars = len(processed_text)
                     preview = processed_text[:60] + "..." if len(processed_text) > 60 else processed_text
                     preview = preview.replace('\n', ' ')  # Single line preview
-                    
+                    mode = "Copied" if self._clipboard_mode else "Typed"
+
                     if self.debug:
                         # Verbose debug output with timings
-                        logger.success("Done", f"{words} words, {chars} chars")
+                        logger.success("Done", f"{words} words, {chars} chars ({mode})")
                         for name, ms in _timings.items():
                             logger.timing("Pipeline", name, ms)
                         logger.info("Text", f'"{preview}"')
                     else:
                         # Concise but useful
-                        logger.success("Typed", f'{words}w/{chars}c in {total_pipeline:.1f}s | "{preview}"')
-                    
+                        logger.success(mode, f'{words}w/{chars}c in {total_pipeline:.1f}s | "{preview}"')
+
                     if self.ui:
-                        self.ui.set_state("idle", f"{words} words")
+                        status = f"Copied! {words}w" if self._clipboard_mode else f"{words} words"
+                        self.ui.set_state("idle", status)
                         self._schedule_state_reset()
                 else:
                     logger.warning("Audio", "No speech detected")

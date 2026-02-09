@@ -1396,7 +1396,7 @@ class CognitiveFlowUI(QObject):
     def start(self):
         """Start Qt application"""
         self.indicator = FloatingIndicator(
-            on_click=self.app.toggle_recording if hasattr(self.app, 'toggle_recording') else None,
+            on_click=(lambda: self.app.toggle_recording(clipboard_mode=True)) if hasattr(self.app, 'toggle_recording') else None,
             get_last_transcription=self.get_last_transcription,
             show_settings=self.show_settings,
             retry_last=self.app.retry_last if hasattr(self.app, 'retry_last') else None

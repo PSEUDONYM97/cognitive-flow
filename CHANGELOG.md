@@ -141,3 +141,9 @@ All notable changes to Cognitive Flow are documented here.
 - Visual feedback bar shows microphone input level in real-time
 - Color changes: amber (quiet), green (good), red (loud)
 - Prevents surprise "no audio" after long recordings
+
+## v1.16.0
+- Clipboard mode: click the indicator to record, transcription goes to clipboard
+- Hotkey (tilde) still types directly into focused window
+- Perfect for admin windows, VTI sessions, or any app that blocks WM_CHAR
+- Shows "Copied!" status when clipboard mode completes
