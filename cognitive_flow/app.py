@@ -41,10 +41,10 @@ def init_app(debug=False):
     from .logger import logger as _logger
     logger = _logger
     
-    # In debug mode, enable file logging
-    if debug:
-        from .paths import DEBUG_LOG_FILE
-        logger.set_log_file(DEBUG_LOG_FILE)
+    # Always log to file (crash evidence survives process death)
+    # --debug flag controls verbose console output, not file logging
+    from .paths import DEBUG_LOG_FILE
+    logger.set_log_file(DEBUG_LOG_FILE)
     
     # Check if NVIDIA GPU libraries are available (actual loading done in backends.py)
     _start = _t()
@@ -1795,7 +1795,14 @@ def main():
         app.audio.terminate()
         print("[Goodbye]")
         os._exit(0)
-    
+
     signal.signal(signal.SIGINT, handle_sigint)
-    
-    app.run()
+
+    try:
+        app.run()
+    except Exception as e:
+        if logger:
+            logger.error("CRASH", f"{type(e).__name__}: {e}")
+            import traceback
+            logger.error("CRASH", traceback.format_exc())
+        raise
