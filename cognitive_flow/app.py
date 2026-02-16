@@ -1378,6 +1378,10 @@ class CognitiveFlowApp:
         self.frames = []
         self.record_start_time = time.time()
 
+        # Wake GPU while user is still talking (free warmup window)
+        if self.backend and self.backend.using_gpu:
+            threading.Thread(target=self.backend.warmup, daemon=True).start()
+
         # Pause media if enabled - but only if audio is actually playing
         self._media_was_paused = False
         if self.pause_media:
@@ -1525,6 +1529,9 @@ class CognitiveFlowApp:
                 
                 if self.backend is None or not self.backend.is_loaded:
                     raise RuntimeError("Model not loaded")
+
+                # Wait for GPU warmup to finish (if still running from start_recording)
+                self.backend.wait_for_warmup()
 
                 _start = _t()
                 result = self.backend.transcribe(audio_array, sample_rate=16000)

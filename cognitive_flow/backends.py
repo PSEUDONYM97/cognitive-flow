@@ -7,6 +7,7 @@ import ctypes
 import os
 import sys
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -119,6 +120,34 @@ class TranscriptionBackend(ABC):
     def using_gpu(self) -> bool:
         """Check if using GPU."""
         pass
+
+    def warmup(self):
+        """Run a tiny inference to wake the GPU from power-saving.
+
+        Called when recording starts so the GPU is warm by the time
+        transcription begins. No-op if not using GPU. Thread-safe --
+        wait_for_warmup() blocks until this completes.
+        """
+        if not self.is_loaded or not self.using_gpu:
+            return
+        if not hasattr(self, '_warmup_event'):
+            self._warmup_event = threading.Event()
+            self._warmup_event.set()
+        self._warmup_event.clear()
+        try:
+            import numpy as np
+            # 0.1s of silence - just enough to poke the CUDA context awake
+            silence = np.zeros(1600, dtype=np.float32)
+            self.transcribe(silence, sample_rate=16000)
+        except Exception:
+            pass  # Best-effort, don't interfere with recording
+        finally:
+            self._warmup_event.set()
+
+    def wait_for_warmup(self):
+        """Block until any in-progress warmup completes."""
+        if hasattr(self, '_warmup_event'):
+            self._warmup_event.wait()
 
 
 class WhisperBackend(TranscriptionBackend):
