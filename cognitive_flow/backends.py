@@ -446,7 +446,12 @@ class RemoteBackend(TranscriptionBackend):
         self._server_model = "remote"
         self._server_gpu = "unknown"
         self._loaded = False
-        self._timeout = 120  # seconds (generous for cold-start model loading)
+        self._timeout = 120  # max timeout (cold-start safety net)
+        self._ready_timeout = 30  # timeout when server confirmed ready
+        self._fast_fail_timeout = 10  # timeout when server was unreachable
+        self._warmup_succeeded = False
+        self._server_cold_start = False
+        self._server_reachable = True
 
     def load(self, model_name: str, use_gpu: bool = True) -> bool:
         """Connect to remote server. model_name is the server URL."""
@@ -479,6 +484,14 @@ class RemoteBackend(TranscriptionBackend):
         import numpy as np
         _t = time.perf_counter
 
+        # Adaptive timeout based on warmup results
+        if self._warmup_succeeded:
+            timeout = self._ready_timeout
+        elif not self._server_reachable:
+            timeout = self._fast_fail_timeout
+        else:
+            timeout = self._timeout
+
         # Convert float32 array to int16 WAV bytes
         _start = _t()
         wav_bytes = self._encode_wav(audio_array, sample_rate)
@@ -502,14 +515,21 @@ class RemoteBackend(TranscriptionBackend):
 
         _network_start = _t()
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8', errors='replace')
             raise RuntimeError(f"Server returned {e.code}: {error_body}")
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"Connection failed: {e.reason}")
+        except (urllib.error.URLError, TimeoutError) as e:
+            reason = str(getattr(e, 'reason', e))
+            if 'timed out' in reason.lower() or isinstance(e, TimeoutError):
+                raise RuntimeError(f"Server timed out ({timeout}s) - server may still be loading model")
+            raise RuntimeError(f"Connection failed: {reason}")
         network_ms = (_t() - _network_start) * 1000
+
+        # Successful transcription confirms server is warm and reachable
+        self._server_reachable = True
+        self._warmup_succeeded = True
 
         raw_text = data.get('text', '').strip()
         server_ms = data.get('processing_time_ms') or 0
@@ -550,19 +570,61 @@ class RemoteBackend(TranscriptionBackend):
         return False  # From client's perspective
 
     def warmup(self):
-        """Hit /health to wake server from idle (triggers model reload)."""
+        """Ping server; if idle, pre-load model during recording time."""
         if not self._loaded or not self._server_url:
             return
         if not hasattr(self, '_warmup_event'):
             self._warmup_event = threading.Event()
             self._warmup_event.set()
         self._warmup_event.clear()
+        self._warmup_succeeded = False
+        self._server_cold_start = False
+        self._server_reachable = True
         try:
-            self._health_check()
-        except Exception:
-            pass  # Best-effort
+            info = self._health_check()
+            if not info:
+                self._server_reachable = False
+                print("[Remote] Server unreachable during warmup")
+                return
+
+            status = info.get('status', 'unknown')
+            if status == 'idle':
+                self._server_cold_start = True
+                print("[Remote] Server idle - pre-loading model...")
+                self._trigger_model_load()
+                self._server_cold_start = False
+                self._warmup_succeeded = True
+            elif status == 'ready':
+                self._warmup_succeeded = True
+            else:
+                print(f"[Remote] Server status: {status}")
+        except Exception as e:
+            print(f"[Remote] Warmup error: {e}")
         finally:
             self._warmup_event.set()
+
+    def _trigger_model_load(self):
+        """Send minimal audio to force server to load its model."""
+        import numpy as np
+        silence = np.zeros(1600, dtype=np.float32)  # 0.1s
+        wav_bytes = self._encode_wav(silence, 16000)
+        boundary = '----CognitiveFlowWarmup'
+        body = self._build_multipart(boundary, 'audio', 'warmup.wav', 'audio/wav', wav_bytes)
+        url = f"{self._server_url}/transcribe"
+        req = urllib.request.Request(
+            url, data=body,
+            headers={
+                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                'Content-Length': str(len(body)),
+            },
+            method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                resp.read()
+            print("[Remote] Model loaded (warmup complete)")
+        except Exception as e:
+            print(f"[Remote] Model pre-load failed: {e}")
 
     def _health_check(self) -> dict | None:
         """GET /health and return parsed JSON, or None on failure."""

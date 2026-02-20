@@ -1555,6 +1555,18 @@ class CognitiveFlowApp:
                 if self.backend is None or not self.backend.is_loaded:
                     raise RuntimeError("Model not loaded")
 
+                # Show server status while waiting for warmup
+                _is_cold_start = getattr(self.backend, '_server_cold_start', False)
+                _server_unreachable = getattr(self.backend, '_server_reachable', True) is False
+                if _is_cold_start:
+                    if self.ui:
+                        self.ui.set_state("processing", "Server loading...")
+                    if self.debug:
+                        logger.info("Remote", "Waiting for server model to load...")
+                elif _server_unreachable:
+                    if self.ui:
+                        self.ui.set_state("processing", "Server unreachable...")
+
                 # Wait for GPU warmup to finish (if still running from start_recording)
                 self.backend.wait_for_warmup()
 
@@ -1642,11 +1654,19 @@ class CognitiveFlowApp:
                         self.ui.set_state("idle", "Ready")
                 
             except Exception as e:
-                print(f"[Error] Transcription failed: {e}")
+                error_msg = str(e)
+                print(f"[Error] Transcription failed: {error_msg}")
                 SoundEffects.play_error()
                 if self.ui:
-                    self.ui.set_state("idle", "Ready")
-        
+                    # Show useful error status instead of generic "Ready"
+                    if 'timed out' in error_msg.lower():
+                        self.ui.set_state("idle", "Server timeout!")
+                    elif 'connection' in error_msg.lower() or 'unreachable' in error_msg.lower():
+                        self.ui.set_state("idle", "Server down!")
+                    else:
+                        self.ui.set_state("idle", "Error!")
+                    self._schedule_state_reset(delay=3.0)
+
         threading.Thread(target=_transcribe, daemon=True).start()
 
     def retry_last(self, audio_file: str | None = None):
