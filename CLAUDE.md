@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Cognitive Flow is a Windows voice-to-text application using local, GPU-accelerated transcription. Press tilde (~) to record, speak, press tilde again - text types into the focused window. Clicking the overlay indicator records in clipboard mode instead (copies to clipboard).
 
-Dual backend support: Whisper (OpenAI via faster-whisper) or Parakeet (NVIDIA via onnx-asr). Switch in Settings.
+Triple backend support: Whisper (OpenAI via faster-whisper), Parakeet (NVIDIA via onnx-asr), or Remote (HTTP server). Switch in Settings.
 
 ## Commands
 
@@ -54,13 +54,14 @@ Format: `MAJOR.MINOR.PATCH` (patch=bugfix, minor=feature, major=breaking)
 
 ### Backend System (backends.py)
 
-`TranscriptionBackend` ABC defines the interface. Two implementations:
+`TranscriptionBackend` ABC defines the interface. Three implementations:
 - **WhisperBackend** - Uses `faster-whisper`. GPU loads `float32`, CPU loads `int8`.
 - **ParakeetBackend** - Uses `onnx-asr`. Requires writing audio to temp file (onnx-asr expects file paths).
+- **RemoteBackend** - Sends audio over HTTP to an external STT server. No local GPU needed. Encodes audio as WAV via stdlib `wave`/`io`, uploads multipart form via `urllib.request`. Server API: `GET /health` (status check), `POST /transcribe` (audio file -> JSON `{text, processing_time_ms}`). Stores network timing breakdown (`last_timings` dict) for pipeline logging.
 
 Critical ordering: `setup_cuda_paths()` MUST run before importing `faster_whisper` or `onnx_asr`. It adds NVIDIA pip package DLL directories to PATH and preloads critical DLLs via `ctypes.CDLL`. This is shared across both backends and runs only once.
 
-Backends support a `warmup()` method - called when recording starts to wake the GPU from power-saving before transcription actually begins (recording gives a free time window).
+Backends support a `warmup()` method - called when recording starts to wake the GPU from power-saving before transcription actually begins (recording gives a free time window). Remote backend pings `/health` to wake idle servers.
 
 ### Text Processing Pipeline (TextProcessor in app.py)
 
@@ -98,7 +99,7 @@ Text is sanitized before output: control chars removed, backticks replaced, fanc
 ### Data Files
 
 All in `%APPDATA%\CognitiveFlow\` (Linux: `~/.cognitive_flow/`):
-- `config.json` - backend_type, model_name, parakeet_model, input_device_index, text_replacements, pause_media, etc.
+- `config.json` - backend_type, model_name, parakeet_model, remote_url, input_device_index, text_replacements, pause_media, etc.
 - `statistics.json` - usage stats, performance_history (last 100 entries)
 - `history.json` - transcription history with timestamps (500 max)
 - `audio/` - FLAC archives of recordings (saved BEFORE transcription so they survive failures)
