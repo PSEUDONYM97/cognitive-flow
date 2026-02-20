@@ -155,3 +155,8 @@ All notable changes to Cognitive Flow are documented here.
 - No new dependencies (uses stdlib urllib + wave)
 - Automatic warmup pings server on recording start
 - Graceful fallback to Whisper if server is unreachable
+
+## v1.17.1
+- Fix multipart form field name ('file' -> 'audio') for server compatibility
+- Fix Test Connection button never showing results (thread-safe signal)
+- Add network pipeline timing: encode, payload size, server vs overhead breakdown
