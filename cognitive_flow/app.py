@@ -1687,23 +1687,56 @@ class CognitiveFlowApp:
                         self._schedule_state_reset()
                     return
 
+                _t = time.perf_counter
+                _timings = {}
+                pipeline_start = _t()
+
                 duration = len(audio_array) / sample_rate
                 logger.info("Retry", f"Transcribing {duration:.1f}s of audio...")
 
+                _start = _t()
                 result = self.backend.transcribe(audio_array, sample_rate=sample_rate)
+                _timings['transcribe'] = result.duration_ms
                 raw_text = result.raw_text
+
+                # Pull in remote network breakdown if available
+                if hasattr(self.backend, 'last_timings'):
+                    rt = self.backend.last_timings
+                    _timings['net_wav_encode'] = rt['encode_ms']
+                    _timings['net_payload'] = rt['payload_kb']
+                    _timings['net_inference'] = rt['server_ms']
+                    _timings['net_latency'] = rt['overhead_ms']
+
+                _start = _t()
                 processed_text = self.processor.process(raw_text)
+                _timings['text_process'] = (_t() - _start) * 1000
 
                 if processed_text:
+                    _start = _t()
                     output_text = processed_text + " " if self.add_trailing_space else processed_text
                     VirtualKeyboard.type_text(output_text)
+                    _timings['typing'] = (_t() - _start) * 1000
 
-                    self.stats.record(duration, processed_text, 0)
+                    total_pipeline = (_t() - pipeline_start) * 1000
+                    _timings['total'] = total_pipeline
+
+                    self.stats.record(duration, processed_text, total_pipeline / 1000)
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration, target_file)
 
                     words = len(processed_text.split())
                     logger.success("Retry", f"{words} words from {target_file}")
+
+                    if self.debug:
+                        for name, value in _timings.items():
+                            if name.startswith('net_'):
+                                label = f"  {name}"
+                                if name == 'net_payload':
+                                    logger.info("Pipeline", f"{label}: {value:.1f}KB")
+                                else:
+                                    logger.timing("Pipeline", label, value)
+                            else:
+                                logger.timing("Pipeline", name, value)
                     if self.ui:
                         self.ui.set_state("idle", f"{words} words")
                         self._schedule_state_reset()
