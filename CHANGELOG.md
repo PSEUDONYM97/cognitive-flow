@@ -164,3 +164,9 @@ All notable changes to Cognitive Flow are documented here.
 ## v1.17.2
 - Network timing breakdown now appears in pipeline log (not just standalone [Remote] line)
 - Pipeline shows net_encode, net_payload_kb, net_server, net_overhead alongside standard steps
+
+## v1.17.3
+- Clearer pipeline labels: net_inference (actual transcription), net_latency (network transit)
+- Network sub-timings indented under transcribe to show hierarchy
+- Pipeline timing added to retry path (was missing entirely)
+- Retry stats now record actual processing time instead of 0
