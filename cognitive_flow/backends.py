@@ -483,7 +483,7 @@ class RemoteBackend(TranscriptionBackend):
 
         # Build multipart form data
         boundary = '----CognitiveFlowBoundary9876543210'
-        body = self._build_multipart(boundary, 'file', 'audio.wav', 'audio/wav', wav_bytes)
+        body = self._build_multipart(boundary, 'audio', 'audio.wav', 'audio/wav', wav_bytes)
 
         url = f"{self._server_url}/transcribe"
         req = urllib.request.Request(
