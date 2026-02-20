@@ -170,3 +170,10 @@ All notable changes to Cognitive Flow are documented here.
 - Network sub-timings indented under transcribe to show hierarchy
 - Pipeline timing added to retry path (was missing entirely)
 - Retry stats now record actual processing time instead of 0
+
+## v1.18.0
+- Smart server warmup: pre-loads model during recording when server is idle
+- Sends throwaway transcription to trigger model load while user speaks
+- Adaptive timeout: 30s when server ready, 10s fast-fail when unreachable, 120s cold-start safety net
+- UI feedback: shows "Server loading..." during cold start, "Server unreachable..." when down
+- Error status in indicator: "Server timeout!", "Server down!" instead of silent reset
