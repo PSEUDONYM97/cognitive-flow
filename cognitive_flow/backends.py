@@ -446,7 +446,7 @@ class RemoteBackend(TranscriptionBackend):
         self._server_model = "remote"
         self._server_gpu = "unknown"
         self._loaded = False
-        self._timeout = 30  # seconds
+        self._timeout = 120  # seconds (generous for cold-start model loading)
 
     def load(self, model_name: str, use_gpu: bool = True) -> bool:
         """Connect to remote server. model_name is the server URL."""
