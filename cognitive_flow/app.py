@@ -1566,10 +1566,10 @@ class CognitiveFlowApp:
                 # Pull in remote network breakdown if available
                 if hasattr(self.backend, 'last_timings'):
                     rt = self.backend.last_timings
-                    _timings['net_encode'] = rt['encode_ms']
-                    _timings['net_upload'] = rt['payload_kb']  # logged separately as KB
-                    _timings['net_server'] = rt['server_ms']
-                    _timings['net_overhead'] = rt['overhead_ms']
+                    _timings['net_wav_encode'] = rt['encode_ms']
+                    _timings['net_payload'] = rt['payload_kb']  # logged separately as KB
+                    _timings['net_inference'] = rt['server_ms']
+                    _timings['net_latency'] = rt['overhead_ms']
 
                 if self.debug:
                     backend_name = self.backend.name.capitalize()
@@ -1621,7 +1621,7 @@ class CognitiveFlowApp:
                         for name, value in _timings.items():
                             if name.startswith('net_'):
                                 label = f"  {name}"
-                                if name == 'net_upload':
+                                if name == 'net_payload':
                                     logger.info("Pipeline", f"{label}: {value:.1f}KB")
                                 else:
                                     logger.timing("Pipeline", label, value)
