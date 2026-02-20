@@ -41,10 +41,10 @@ def init_app(debug=False):
     from .logger import logger as _logger
     logger = _logger
     
-    # In debug mode, enable file logging
-    if debug:
-        from .paths import DEBUG_LOG_FILE
-        logger.set_log_file(DEBUG_LOG_FILE)
+    # Always log to file (crash evidence survives process death)
+    # --debug flag controls verbose console output, not file logging
+    from .paths import DEBUG_LOG_FILE
+    logger.set_log_file(DEBUG_LOG_FILE)
     
     # Check if NVIDIA GPU libraries are available (actual loading done in backends.py)
     _start = _t()
@@ -892,6 +892,59 @@ class VirtualKeyboard:
         return ''.join(c for c in text if (32 <= ord(c) <= 126) or c in '\n\t' or (192 <= ord(c) <= 255))
     
     @staticmethod
+    def copy_to_clipboard(text: str):
+        """Copy text to Windows clipboard. Tries Win32 API, falls back to PyQt6."""
+        try:
+            VirtualKeyboard._clipboard_win32(text)
+        except Exception as e:
+            print(f"[Clipboard] Win32 failed ({e}), trying PyQt6 fallback...")
+            try:
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    app.clipboard().setText(text)
+                else:
+                    raise RuntimeError("No QApplication")
+            except Exception as e2:
+                print(f"[Clipboard] All methods failed: {e2}")
+
+    @staticmethod
+    def _clipboard_win32(text: str):
+        """Copy text via Win32 clipboard API (works from any thread, any length)."""
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0002
+
+        _user32 = ctypes.windll.user32
+        _kernel32 = ctypes.windll.kernel32
+
+        # Declare types for 64-bit Windows (default c_int truncates pointers)
+        _kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        _kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        _kernel32.GlobalLock.restype = ctypes.c_void_p
+        _kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        _kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        _user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+        text_bytes = (text + '\0').encode('utf-16-le')
+
+        if not _user32.OpenClipboard(0):
+            raise RuntimeError("OpenClipboard failed")
+
+        try:
+            _user32.EmptyClipboard()
+            h_mem = _kernel32.GlobalAlloc(GMEM_MOVEABLE, len(text_bytes))
+            if not h_mem:
+                raise RuntimeError("GlobalAlloc failed")
+            p_mem = _kernel32.GlobalLock(h_mem)
+            if not p_mem:
+                raise RuntimeError("GlobalLock failed")
+            ctypes.memmove(p_mem, text_bytes, len(text_bytes))
+            _kernel32.GlobalUnlock(h_mem)
+            _user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+        finally:
+            _user32.CloseClipboard()
+
+    @staticmethod
     def type_text(text: str):
         """Type text by posting WM_CHAR messages directly to the focused control.
         
@@ -966,6 +1019,9 @@ class CognitiveFlowApp:
         self.last_duration = 0.0
         self.last_audio_file: str | None = None
 
+        # Clipboard mode: when recording triggered by indicator click
+        self._clipboard_mode = False
+
         # State reset timer (to prevent race conditions)
         self._state_reset_timer: threading.Timer | None = None
 
@@ -997,14 +1053,20 @@ class CognitiveFlowApp:
         self.config_file = CONFIG_FILE
         self._load_config()
         if self.debug:
-            model = self.parakeet_model if self.backend_type == 'parakeet' else self.model_name
+            if self.backend_type == 'remote':
+                model = self.remote_url
+            elif self.backend_type == 'parakeet':
+                model = self.parakeet_model
+            else:
+                model = self.model_name
             logger.info("Model", f"Loading {self.backend_type} model ({model})...")
     
     def _load_config(self):
         # Defaults
-        self.backend_type = 'whisper'  # 'whisper' or 'parakeet'
+        self.backend_type = 'whisper'  # 'whisper', 'parakeet', or 'remote'
         self.model_name = 'medium'     # Whisper: tiny/base/small/medium/large
         self.parakeet_model = 'nemo-parakeet-tdt-0.6b-v2'  # Parakeet model
+        self.remote_url = ''           # Remote server URL (e.g. http://192.168.0.10:9200)
         self.add_trailing_space = True  # Add space after each transcription
         self.input_device_index = None  # None = system default
         self.show_overlay = True  # Show floating indicator
@@ -1019,6 +1081,7 @@ class CognitiveFlowApp:
                     self.backend_type = config.get('backend_type', 'whisper')
                     self.model_name = config.get('model_name', 'medium')
                     self.parakeet_model = config.get('parakeet_model', 'nemo-parakeet-tdt-0.6b-v2')
+                    self.remote_url = config.get('remote_url', '')
                     self.add_trailing_space = config.get('add_trailing_space', True)
                     self.input_device_index = config.get('input_device_index', None)
                     self.show_overlay = config.get('show_overlay', True)
@@ -1036,6 +1099,7 @@ class CognitiveFlowApp:
             'backend_type': self.backend_type,
             'model_name': self.model_name,
             'parakeet_model': self.parakeet_model,
+            'remote_url': self.remote_url,
             'add_trailing_space': self.add_trailing_space,
             'input_device_index': self.input_device_index,
             'show_overlay': self.show_overlay,
@@ -1063,12 +1127,15 @@ class CognitiveFlowApp:
         self.model_loading = True
 
         def _load():
-            from .backends import get_backend, WhisperBackend, ParakeetBackend
+            from .backends import get_backend, WhisperBackend, ParakeetBackend, RemoteBackend
             _t = time.perf_counter
 
             try:
                 # Determine model name based on backend
-                if self.backend_type == 'parakeet':
+                if self.backend_type == 'remote':
+                    model_name = self.remote_url
+                    backend_class = RemoteBackend
+                elif self.backend_type == 'parakeet':
                     model_name = self.parakeet_model
                     backend_class = ParakeetBackend
                 else:
@@ -1098,7 +1165,10 @@ class CognitiveFlowApp:
                 self.model = self.backend  # Legacy compatibility
 
                 load_time = (_t() - _start) * 1000
-                device = "GPU" if self.using_gpu else "CPU"
+                if isinstance(self.backend, RemoteBackend):
+                    device = "Remote"
+                else:
+                    device = "GPU" if self.using_gpu else "CPU"
 
                 if self.debug:
                     logger.timing(device, "model_load", load_time)
@@ -1137,9 +1207,13 @@ class CognitiveFlowApp:
             except Exception as e:
                 print(f"[Error] Failed to load {self.backend_type}: {e}")
 
-                # If Parakeet failed, clean up corrupted downloads and fall back to Whisper
                 original_backend = self.backend_type
-                if original_backend == 'parakeet':
+                # Don't permanently revert remote if URL is just unconfigured
+                remote_unconfigured = (original_backend == 'remote' and not self.remote_url)
+
+                if original_backend == 'remote':
+                    print("[Fallback] Remote server failed - falling back to Whisper")
+                elif original_backend == 'parakeet':
                     print("[Fallback] Parakeet failed - reverting to Whisper")
                     # Clean up any corrupted/partial downloads
                     from .backends import ParakeetBackend
@@ -1160,13 +1234,18 @@ class CognitiveFlowApp:
 
                     self.model = self.backend
                     self.model_name = fallback_model
-                    self.backend_type = "whisper"
                     self.using_gpu = self.backend.using_gpu
 
-                    # Save config so we don't try failed backend on next startup
-                    if original_backend != 'whisper':
-                        self.save_config()
-                        print(f"[Config] Reverted to Whisper ({fallback_model})")
+                    if remote_unconfigured:
+                        # Keep backend_type as 'remote' so user can configure URL later
+                        # Just use Whisper as runtime fallback without persisting
+                        print(f"[Config] Using Whisper ({fallback_model}) until remote server is configured")
+                    else:
+                        self.backend_type = "whisper"
+                        # Save config so we don't try failed backend on next startup
+                        if original_backend != 'whisper':
+                            self.save_config()
+                            print(f"[Config] Reverted to Whisper ({fallback_model})")
 
                     device = "GPU" if self.using_gpu else "CPU"
                     print(f"[Ready] Using Whisper {fallback_model} ({device})")
@@ -1185,12 +1264,14 @@ class CognitiveFlowApp:
         threading.Thread(target=_load, daemon=True).start()
 
     def warmup_gpu(self):
-        """Run a silent warmup transcription to re-initialize GPU after sleep/wake."""
+        """Run a silent warmup transcription to re-initialize GPU/server after sleep/wake."""
         if self.model_loading:
             return  # Already loading
         if not self.backend or not self.backend.is_loaded:
             return  # No model loaded
-        if not self.using_gpu:
+        # Remote backends benefit from a wake ping too (re-establishes connectivity)
+        is_remote = getattr(self.backend, 'name', '') == 'remote'
+        if not self.using_gpu and not is_remote:
             return  # CPU doesn't need warmup
 
         def _warmup():
@@ -1283,17 +1364,18 @@ class CognitiveFlowApp:
             else:
                 time.sleep(0.001)
     
-    def toggle_recording(self):
+    def toggle_recording(self, clipboard_mode=False):
         if self.model_loading:
             logger.warning("Record", "Model still loading...")
             return
-        
+
         if not self.model:
             logger.error("Record", "Model not loaded")
             SoundEffects.play_error()
             return
-        
+
         if not self.is_recording:
+            self._clipboard_mode = clipboard_mode
             self.start_recording()
         else:
             self.stop_recording()
@@ -1320,6 +1402,10 @@ class CognitiveFlowApp:
         self.is_recording = True
         self.frames = []
         self.record_start_time = time.time()
+
+        # Wake GPU/server while user is still talking (free warmup window)
+        if self.backend and (self.backend.using_gpu or self.backend.name == 'remote'):
+            threading.Thread(target=self.backend.warmup, daemon=True).start()
 
         # Pause media if enabled - but only if audio is actually playing
         self._media_was_paused = False
@@ -1390,6 +1476,7 @@ class CognitiveFlowApp:
         """Cancel recording without transcribing (Escape key)."""
         self.is_recording = False
         self.frames = []  # Discard recorded audio
+        self._clipboard_mode = False
 
         # Resume media if we paused it
         if getattr(self, '_media_was_paused', False):
@@ -1468,6 +1555,9 @@ class CognitiveFlowApp:
                 if self.backend is None or not self.backend.is_loaded:
                     raise RuntimeError("Model not loaded")
 
+                # Wait for GPU warmup to finish (if still running from start_recording)
+                self.backend.wait_for_warmup()
+
                 _start = _t()
                 result = self.backend.transcribe(audio_array, sample_rate=16000)
                 _timings['transcribe'] = result.duration_ms
@@ -1488,41 +1578,47 @@ class CognitiveFlowApp:
                 
                 if processed_text:
                     _start = _t()
-                    # Add trailing space if enabled (helps separate consecutive transcriptions)
-                    output_text = processed_text + " " if self.add_trailing_space else processed_text
-                    VirtualKeyboard.type_text(output_text)
+                    if self._clipboard_mode:
+                        # Clipboard mode (triggered by indicator click)
+                        VirtualKeyboard.copy_to_clipboard(processed_text)
+                    else:
+                        # Type mode (triggered by hotkey)
+                        output_text = processed_text + " " if self.add_trailing_space else processed_text
+                        VirtualKeyboard.type_text(output_text)
                     _timings['typing'] = (_t() - _start) * 1000
-                    
+
                     total_pipeline = (_t() - pipeline_start) * 1000  # ms
                     _timings['total'] = total_pipeline
-                    
+
                     self.stats.record(duration, processed_text, total_pipeline / 1000)
-                    
+
                     if self.ui:
                         self.ui.add_transcription(processed_text, duration, self.last_audio_file)
-                    
+
                     # Log to file for debugging terminal breaks (debug mode only)
                     if self.debug:
                         logger.log_transcription(raw_text, processed_text, duration, _timings)
-                    
+
                     # Rich logging
                     words = len(processed_text.split())
                     chars = len(processed_text)
                     preview = processed_text[:60] + "..." if len(processed_text) > 60 else processed_text
                     preview = preview.replace('\n', ' ')  # Single line preview
-                    
+                    mode = "Copied" if self._clipboard_mode else "Typed"
+
                     if self.debug:
                         # Verbose debug output with timings
-                        logger.success("Done", f"{words} words, {chars} chars")
+                        logger.success("Done", f"{words} words, {chars} chars ({mode})")
                         for name, ms in _timings.items():
                             logger.timing("Pipeline", name, ms)
                         logger.info("Text", f'"{preview}"')
                     else:
                         # Concise but useful
-                        logger.success("Typed", f'{words}w/{chars}c in {total_pipeline:.1f}s | "{preview}"')
-                    
+                        logger.success(mode, f'{words}w/{chars}c in {total_pipeline:.1f}s | "{preview}"')
+
                     if self.ui:
-                        self.ui.set_state("idle", f"{words} words")
+                        status = f"Copied! {words}w" if self._clipboard_mode else f"{words} words"
+                        self.ui.set_state("idle", status)
                         self._schedule_state_reset()
                 else:
                     logger.warning("Audio", "No speech detected")
@@ -1731,7 +1827,14 @@ def main():
         app.audio.terminate()
         print("[Goodbye]")
         os._exit(0)
-    
+
     signal.signal(signal.SIGINT, handle_sigint)
-    
-    app.run()
+
+    try:
+        app.run()
+    except Exception as e:
+        if logger:
+            logger.error("CRASH", f"{type(e).__name__}: {e}")
+            import traceback
+            logger.error("CRASH", traceback.format_exc())
+        raise

@@ -202,6 +202,7 @@ class SettingsDialog(QDialog):
         self.backend_combo = NoScrollComboBox()
         self.backend_combo.addItem("Whisper (OpenAI)", "whisper")
         self.backend_combo.addItem("Parakeet (NVIDIA) - Faster", "parakeet")
+        self.backend_combo.addItem("Remote Server", "remote")
         self.backend_combo.setObjectName("settingsCombo")
         self.backend_combo.setFixedHeight(36)
 
@@ -221,6 +222,44 @@ class SettingsDialog(QDialog):
         backend_layout.addWidget(self.backend_desc)
 
         scroll_layout.addLayout(backend_layout)
+
+        # Remote Server URL (visible only when remote backend selected)
+        self.remote_url_row = QFrame()
+        remote_url_layout = QVBoxLayout(self.remote_url_row)
+        remote_url_layout.setContentsMargins(0, 0, 0, 0)
+        remote_url_layout.setSpacing(8)
+
+        remote_url_layout.addWidget(self._create_section_header("Server URL"))
+
+        self.remote_url_input = QLineEdit()
+        self.remote_url_input.setPlaceholderText("http://192.168.0.10:9200")
+        self.remote_url_input.setFixedHeight(36)
+        self.remote_url_input.setObjectName("replacementInput")
+        current_url = getattr(self.app_ref, 'remote_url', '') if self.app_ref else ''
+        self.remote_url_input.setText(current_url)
+        self.remote_url_input.editingFinished.connect(self._on_remote_url_changed)
+        remote_url_layout.addWidget(self.remote_url_input)
+
+        remote_url_btn_row = QHBoxLayout()
+        remote_url_btn_row.setSpacing(8)
+
+        self.remote_test_btn = QPushButton("Test Connection")
+        self.remote_test_btn.setFixedHeight(32)
+        self.remote_test_btn.setObjectName("addReplacementBtn")
+        self.remote_test_btn.clicked.connect(self._on_test_remote)
+        remote_url_btn_row.addWidget(self.remote_test_btn)
+        remote_url_btn_row.addStretch()
+        remote_url_layout.addLayout(remote_url_btn_row)
+
+        self.remote_status_label = QLabel("Enter your speech-to-text server URL")
+        self.remote_status_label.setWordWrap(True)
+        self.remote_status_label.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+        remote_url_layout.addWidget(self.remote_status_label)
+
+        scroll_layout.addWidget(self.remote_url_row)
+
+        # Set initial visibility
+        self.remote_url_row.setVisible(current_backend == 'remote')
 
         # Model Selection
         scroll_layout.addWidget(self._create_section_header("Model"))
@@ -649,21 +688,32 @@ class SettingsDialog(QDialog):
 
         backend = self._get_current_backend()
 
-        if backend == 'parakeet':
+        if backend == 'remote':
+            # Model is server-side, not user-selectable
+            server_model = "Server-provided"
+            if self.app_ref and hasattr(self.app_ref, 'backend') and self.app_ref.backend:
+                if hasattr(self.app_ref.backend, '_server_model'):
+                    server_model = self.app_ref.backend._server_model
+            self.model_combo.addItem(server_model)
+            self.model_combo.setEnabled(False)
+        elif backend == 'parakeet':
+            self.model_combo.setEnabled(True)
             self.model_combo.addItems([
                 "nemo-parakeet-tdt-0.6b-v2",
                 "nemo-parakeet-tdt-0.6b-v3",
                 "nemo-parakeet-tdt-0.6b-v3-int8",
             ])
             current = getattr(self.app_ref, 'parakeet_model', 'nemo-parakeet-tdt-0.6b-v2') if self.app_ref else 'nemo-parakeet-tdt-0.6b-v2'
+            idx = self.model_combo.findText(current)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
         else:
+            self.model_combo.setEnabled(True)
             self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
             current = getattr(self.app_ref, 'model_name', 'medium') if self.app_ref else 'medium'
-
-        # Set current selection
-        idx = self.model_combo.findText(current)
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
+            idx = self.model_combo.findText(current)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
 
         self.model_combo.blockSignals(False)
 
@@ -671,6 +721,10 @@ class SettingsDialog(QDialog):
         """Update model description based on current selection."""
         backend = self._get_current_backend()
         model = self.model_combo.currentText()
+
+        if backend == 'remote':
+            self.model_desc.setText("Model is provided by the remote server")
+            return
 
         if backend == 'parakeet':
             descriptions = {
@@ -695,6 +749,11 @@ class SettingsDialog(QDialog):
             return
 
         backend = self.backend_combo.itemData(index)
+
+        # Toggle remote URL row visibility
+        if hasattr(self, 'remote_url_row'):
+            self.remote_url_row.setVisible(backend == 'remote')
+
         if backend == self.app_ref.backend_type:
             return
 
@@ -717,6 +776,11 @@ class SettingsDialog(QDialog):
         self._populate_model_combo()
         self._update_model_description()
 
+        # For remote: don't auto-reload if URL is empty
+        if backend == 'remote' and not getattr(self.app_ref, 'remote_url', ''):
+            print("[Settings] Switched to remote - enter server URL and click Test")
+            return
+
         # Reload model with new backend
         if hasattr(self.app_ref, 'load_model'):
             model = self.model_combo.currentText()
@@ -731,6 +795,10 @@ class SettingsDialog(QDialog):
             return
 
         backend = self._get_current_backend()
+
+        # Remote model is server-side, not user-changeable
+        if backend == 'remote':
+            return
 
         # Determine which config property to update
         if backend == 'parakeet':
@@ -771,6 +839,78 @@ class SettingsDialog(QDialog):
             if hasattr(self.app_ref, 'save_config'):
                 self.app_ref.save_config()
             print(f"[Settings] Pause media: {'on' if checked else 'off'}")
+
+    def _on_remote_url_changed(self):
+        """Handle remote URL field losing focus or Enter pressed."""
+        if not self.app_ref:
+            return
+        url = self.remote_url_input.text().strip()
+        if url == getattr(self.app_ref, 'remote_url', ''):
+            return
+        self.app_ref.remote_url = url
+        if hasattr(self.app_ref, 'save_config'):
+            self.app_ref.save_config()
+        print(f"[Settings] Remote URL: {url}")
+
+    def _on_test_remote(self):
+        """Test connection to remote server."""
+        url = self.remote_url_input.text().strip()
+        if not url:
+            self.remote_status_label.setText("Enter a server URL first")
+            self.remote_status_label.setStyleSheet(f"color: {COLORS['error'].name()}; font-size: 11px;")
+            return
+
+        # Save URL
+        if self.app_ref:
+            self.app_ref.remote_url = url
+            if hasattr(self.app_ref, 'save_config'):
+                self.app_ref.save_config()
+
+        self.remote_status_label.setText("Testing...")
+        self.remote_status_label.setStyleSheet(f"color: {COLORS['processing'].name()}; font-size: 11px;")
+        self.remote_test_btn.setEnabled(False)
+
+        # Run test in background to avoid freezing UI
+        def _test():
+            try:
+                from .backends import RemoteBackend
+                backend = RemoteBackend()
+                backend._server_url = url.rstrip('/')
+                info = backend._health_check()
+                if info:
+                    model = info.get('model', 'unknown')
+                    gpu = info.get('gpu', 'unknown')
+                    status = info.get('status', 'unknown')
+                    msg = f"Connected! Model: {model} | GPU: {gpu} | Status: {status}"
+                    QTimer.singleShot(0, lambda: self._set_remote_status(msg, 'success'))
+
+                    # If backend is remote, reload model (with loading guard)
+                    if self.app_ref and self.app_ref.backend_type == 'remote':
+                        if hasattr(self.app_ref, 'load_model'):
+                            if not getattr(self.app_ref, 'model_loading', False):
+                                self.app_ref.load_model()
+                else:
+                    QTimer.singleShot(0, lambda: self._set_remote_status(
+                        f"Could not reach {url}", 'error'))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._set_remote_status(
+                    f"Error: {e}", 'error'))
+            finally:
+                QTimer.singleShot(0, lambda: self.remote_test_btn.setEnabled(True))
+
+        import threading
+        threading.Thread(target=_test, daemon=True).start()
+
+    def _set_remote_status(self, message: str, status: str = 'info'):
+        """Update remote status label with color."""
+        color_map = {
+            'success': COLORS['success'].name(),
+            'error': COLORS['error'].name(),
+            'info': COLORS['text_muted'].name(),
+        }
+        color = color_map.get(status, COLORS['text_muted'].name())
+        self.remote_status_label.setText(message)
+        self.remote_status_label.setStyleSheet(f"color: {color}; font-size: 11px;")
 
     def _populate_replacements(self):
         """Populate replacements list from config"""
@@ -868,7 +1008,8 @@ class SettingsDialog(QDialog):
         """Check if model is loading and enable/disable dropdowns accordingly"""
         is_loading = self.app_ref and hasattr(self.app_ref, 'model_loading') and self.app_ref.model_loading
         self.backend_combo.setEnabled(not is_loading)
-        self.model_combo.setEnabled(not is_loading)
+        is_remote = self._get_current_backend() == 'remote'
+        self.model_combo.setEnabled(not is_loading and not is_remote)
         # Update model description to show loading status
         if is_loading:
             self.model_desc.setText("Model is loading... please wait")
@@ -1396,7 +1537,7 @@ class CognitiveFlowUI(QObject):
     def start(self):
         """Start Qt application"""
         self.indicator = FloatingIndicator(
-            on_click=self.app.toggle_recording if hasattr(self.app, 'toggle_recording') else None,
+            on_click=(lambda: self.app.toggle_recording(clipboard_mode=True)) if hasattr(self.app, 'toggle_recording') else None,
             get_last_transcription=self.get_last_transcription,
             show_settings=self.show_settings,
             retry_last=self.app.retry_last if hasattr(self.app, 'retry_last') else None
