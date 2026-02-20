@@ -515,6 +515,15 @@ class RemoteBackend(TranscriptionBackend):
         server_ms = data.get('processing_time_ms') or 0
         overhead_ms = network_ms - server_ms if server_ms else 0
 
+        # Store timing breakdown for pipeline logging
+        self.last_timings = {
+            'encode_ms': encode_ms,
+            'payload_kb': payload_kb,
+            'network_ms': network_ms,
+            'server_ms': server_ms,
+            'overhead_ms': overhead_ms,
+        }
+
         # Log network pipeline breakdown
         print(f"[Remote] encode={encode_ms:.1f}ms | upload={payload_kb:.1f}KB | "
               f"network={network_ms:.1f}ms (server={server_ms:.1f}ms + overhead={overhead_ms:.1f}ms)")

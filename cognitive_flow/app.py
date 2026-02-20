@@ -1563,6 +1563,14 @@ class CognitiveFlowApp:
                 _timings['transcribe'] = result.duration_ms
                 raw_text = result.raw_text
 
+                # Pull in remote network breakdown if available
+                if hasattr(self.backend, 'last_timings'):
+                    rt = self.backend.last_timings
+                    _timings['net_encode'] = rt['encode_ms']
+                    _timings['net_payload_kb'] = rt['payload_kb']
+                    _timings['net_server'] = rt['server_ms']
+                    _timings['net_overhead'] = rt['overhead_ms']
+
                 if self.debug:
                     backend_name = self.backend.name.capitalize()
                     logger.info("Raw", f'{backend_name} output: "{raw_text}"')
