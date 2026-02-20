@@ -1617,9 +1617,14 @@ class CognitiveFlowApp:
                     if self.debug:
                         # Verbose debug output with timings
                         logger.success("Done", f"{words} words, {chars} chars ({mode})")
+                        # net_* are sub-timings of transcribe, indent to show hierarchy
                         for name, value in _timings.items():
-                            if name == 'net_upload':
-                                logger.info("Pipeline", f"{name}: {value:.1f}KB")
+                            if name.startswith('net_'):
+                                label = f"  {name}"
+                                if name == 'net_upload':
+                                    logger.info("Pipeline", f"{label}: {value:.1f}KB")
+                                else:
+                                    logger.timing("Pipeline", label, value)
                             else:
                                 logger.timing("Pipeline", name, value)
                         logger.info("Text", f'"{preview}"')
