@@ -92,9 +92,17 @@ class TranscriptionHistory:
 class SettingsDialog(QDialog):
     """Professional settings dialog with all app configuration"""
 
+    # Signal for thread-safe remote status updates
+    _remote_status_signal = pyqtSignal(str, str)  # message, status
+    _remote_btn_enable = pyqtSignal(bool)
+
     def __init__(self, parent=None, app_ref=None):
         super().__init__(parent)
         self.app_ref = app_ref
+
+        # Thread-safe remote status updates
+        self._remote_status_signal.connect(self._set_remote_status, Qt.ConnectionType.QueuedConnection)
+        self._remote_btn_enable.connect(lambda enabled: self.remote_test_btn.setEnabled(enabled) if hasattr(self, 'remote_test_btn') else None, Qt.ConnectionType.QueuedConnection)
 
         # Window setup
         self.setWindowTitle("Cognitive Flow Settings")
@@ -881,8 +889,8 @@ class SettingsDialog(QDialog):
                     model = info.get('model', 'unknown')
                     gpu = info.get('gpu', 'unknown')
                     status = info.get('status', 'unknown')
-                    msg = f"Connected! Model: {model} | GPU: {gpu} | Status: {status}"
-                    QTimer.singleShot(0, lambda: self._set_remote_status(msg, 'success'))
+                    self._remote_status_signal.emit(
+                        f"Connected! Model: {model} | GPU: {gpu} | Status: {status}", 'success')
 
                     # If backend is remote, reload model (with loading guard)
                     if self.app_ref and self.app_ref.backend_type == 'remote':
@@ -890,13 +898,11 @@ class SettingsDialog(QDialog):
                             if not getattr(self.app_ref, 'model_loading', False):
                                 self.app_ref.load_model()
                 else:
-                    QTimer.singleShot(0, lambda: self._set_remote_status(
-                        f"Could not reach {url}", 'error'))
+                    self._remote_status_signal.emit(f"Could not reach {url}", 'error')
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._set_remote_status(
-                    f"Error: {e}", 'error'))
+                self._remote_status_signal.emit(f"Error: {e}", 'error')
             finally:
-                QTimer.singleShot(0, lambda: self.remote_test_btn.setEnabled(True))
+                self._remote_btn_enable.emit(True)
 
         import threading
         threading.Thread(target=_test, daemon=True).start()

@@ -477,13 +477,17 @@ class RemoteBackend(TranscriptionBackend):
             raise RuntimeError("Remote backend not connected")
 
         import numpy as np
+        _t = time.perf_counter
 
         # Convert float32 array to int16 WAV bytes
+        _start = _t()
         wav_bytes = self._encode_wav(audio_array, sample_rate)
+        encode_ms = (_t() - _start) * 1000
 
         # Build multipart form data
         boundary = '----CognitiveFlowBoundary9876543210'
         body = self._build_multipart(boundary, 'audio', 'audio.wav', 'audio/wav', wav_bytes)
+        payload_kb = len(body) / 1024
 
         url = f"{self._server_url}/transcribe"
         req = urllib.request.Request(
@@ -496,7 +500,7 @@ class RemoteBackend(TranscriptionBackend):
             method='POST'
         )
 
-        _start = time.perf_counter()
+        _network_start = _t()
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
@@ -505,10 +509,18 @@ class RemoteBackend(TranscriptionBackend):
             raise RuntimeError(f"Server returned {e.code}: {error_body}")
         except urllib.error.URLError as e:
             raise RuntimeError(f"Connection failed: {e.reason}")
+        network_ms = (_t() - _network_start) * 1000
 
         raw_text = data.get('text', '').strip()
-        # Use server-reported processing time if available, else measure round-trip
-        duration_ms = data.get('processing_time_ms') or ((time.perf_counter() - _start) * 1000)
+        server_ms = data.get('processing_time_ms') or 0
+        overhead_ms = network_ms - server_ms if server_ms else 0
+
+        # Log network pipeline breakdown
+        print(f"[Remote] encode={encode_ms:.1f}ms | upload={payload_kb:.1f}KB | "
+              f"network={network_ms:.1f}ms (server={server_ms:.1f}ms + overhead={overhead_ms:.1f}ms)")
+
+        # Use round-trip time as duration (includes network, which is what the user experiences)
+        duration_ms = network_ms
 
         return TranscriptionResult(
             text=raw_text,
