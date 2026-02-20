@@ -1,14 +1,19 @@
 """
 Transcription backends for Cognitive Flow.
-Provides unified interface for Whisper and Parakeet ASR models.
+Provides unified interface for Whisper, Parakeet, and Remote ASR backends.
 """
 
 import ctypes
+import io
+import json
 import os
 import sys
 import tempfile
 import threading
 import time
+import urllib.request
+import urllib.error
+import wave
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import NamedTuple
@@ -430,10 +435,163 @@ class ParakeetBackend(TranscriptionBackend):
             return False
 
 
+class RemoteBackend(TranscriptionBackend):
+    """Remote transcription backend - sends audio to an HTTP server."""
+
+    name = "remote"
+    supports_gpu = False  # GPU is server-side, not our concern
+
+    def __init__(self):
+        self._server_url = None
+        self._server_model = "remote"
+        self._server_gpu = "unknown"
+        self._loaded = False
+        self._timeout = 30  # seconds
+
+    def load(self, model_name: str, use_gpu: bool = True) -> bool:
+        """Connect to remote server. model_name is the server URL."""
+        if not model_name or not model_name.strip():
+            print("[Remote] No server URL configured")
+            return False
+        self._server_url = model_name.rstrip('/')
+        try:
+            info = self._health_check()
+            if info and info.get('status') in ('ready', 'idle'):
+                self._server_model = info.get('model', 'remote')
+                self._server_gpu = info.get('gpu', 'unknown')
+                self._loaded = True
+                status = info.get('status')
+                print(f"[Remote] Connected to {self._server_url} ({self._server_model}, GPU: {self._server_gpu}, status: {status})")
+                return True
+            else:
+                status = info.get('status', 'unknown') if info else 'no response'
+                print(f"[Remote] Server not ready: {status}")
+                return False
+        except Exception as e:
+            print(f"[Remote] Failed to connect to {self._server_url}: {e}")
+            return False
+
+    def transcribe(self, audio_array, sample_rate: int = 16000) -> TranscriptionResult:
+        """Send audio to remote server for transcription."""
+        if not self._loaded:
+            raise RuntimeError("Remote backend not connected")
+
+        import numpy as np
+
+        # Convert float32 array to int16 WAV bytes
+        wav_bytes = self._encode_wav(audio_array, sample_rate)
+
+        # Build multipart form data
+        boundary = '----CognitiveFlowBoundary9876543210'
+        body = self._build_multipart(boundary, 'file', 'audio.wav', 'audio/wav', wav_bytes)
+
+        url = f"{self._server_url}/transcribe"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                'Content-Length': str(len(body)),
+            },
+            method='POST'
+        )
+
+        _start = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='replace')
+            raise RuntimeError(f"Server returned {e.code}: {error_body}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Connection failed: {e.reason}")
+
+        raw_text = data.get('text', '').strip()
+        # Use server-reported processing time if available, else measure round-trip
+        duration_ms = data.get('processing_time_ms') or ((time.perf_counter() - _start) * 1000)
+
+        return TranscriptionResult(
+            text=raw_text,
+            raw_text=raw_text,
+            duration_ms=duration_ms,
+            segments=data.get('segments')
+        )
+
+    def get_available_models(self) -> list[str]:
+        return [self._server_model]
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    @property
+    def using_gpu(self) -> bool:
+        return False  # From client's perspective
+
+    def warmup(self):
+        """Hit /health to wake server from idle (triggers model reload)."""
+        if not self._loaded or not self._server_url:
+            return
+        if not hasattr(self, '_warmup_event'):
+            self._warmup_event = threading.Event()
+            self._warmup_event.set()
+        self._warmup_event.clear()
+        try:
+            self._health_check()
+        except Exception:
+            pass  # Best-effort
+        finally:
+            self._warmup_event.set()
+
+    def _health_check(self) -> dict | None:
+        """GET /health and return parsed JSON, or None on failure."""
+        url = f"{self._server_url}/health"
+        req = urllib.request.Request(url, headers={'User-Agent': 'CognitiveFlow'})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _encode_wav(audio_array, sample_rate: int) -> bytes:
+        """Convert float32 numpy array to WAV bytes (int16 PCM)."""
+        import numpy as np
+        # Clamp and convert to int16
+        clipped = np.clip(audio_array, -1.0, 1.0)
+        int16_data = (clipped * 32767).astype(np.int16)
+
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(sample_rate)
+            wf.writeframes(int16_data.tobytes())
+        return buf.getvalue()
+
+    @staticmethod
+    def _build_multipart(boundary: str, field_name: str, filename: str,
+                         content_type: str, data: bytes) -> bytes:
+        """Build multipart/form-data body manually."""
+        parts = []
+        parts.append(f'--{boundary}'.encode())
+        parts.append(f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"'.encode())
+        parts.append(f'Content-Type: {content_type}'.encode())
+        parts.append(b'')
+        parts.append(data)
+        parts.append(f'--{boundary}--'.encode())
+        return b'\r\n'.join(parts)
+
+    def test_connection(self) -> dict | None:
+        """Test connection and return server info. For UI Test button."""
+        return self._health_check()
+
+
 # Backend registry
 BACKENDS = {
     "whisper": WhisperBackend,
     "parakeet": ParakeetBackend,
+    "remote": RemoteBackend,
 }
 
 
@@ -461,5 +619,8 @@ def get_available_backends() -> list[str]:
         available.append("parakeet")
     except ImportError:
         pass
+
+    # Remote is always available (no local deps)
+    available.append("remote")
 
     return available

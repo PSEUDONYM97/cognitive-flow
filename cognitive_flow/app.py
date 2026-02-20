@@ -1053,14 +1053,20 @@ class CognitiveFlowApp:
         self.config_file = CONFIG_FILE
         self._load_config()
         if self.debug:
-            model = self.parakeet_model if self.backend_type == 'parakeet' else self.model_name
+            if self.backend_type == 'remote':
+                model = self.remote_url
+            elif self.backend_type == 'parakeet':
+                model = self.parakeet_model
+            else:
+                model = self.model_name
             logger.info("Model", f"Loading {self.backend_type} model ({model})...")
     
     def _load_config(self):
         # Defaults
-        self.backend_type = 'whisper'  # 'whisper' or 'parakeet'
+        self.backend_type = 'whisper'  # 'whisper', 'parakeet', or 'remote'
         self.model_name = 'medium'     # Whisper: tiny/base/small/medium/large
         self.parakeet_model = 'nemo-parakeet-tdt-0.6b-v2'  # Parakeet model
+        self.remote_url = ''           # Remote server URL (e.g. http://192.168.0.10:9200)
         self.add_trailing_space = True  # Add space after each transcription
         self.input_device_index = None  # None = system default
         self.show_overlay = True  # Show floating indicator
@@ -1075,6 +1081,7 @@ class CognitiveFlowApp:
                     self.backend_type = config.get('backend_type', 'whisper')
                     self.model_name = config.get('model_name', 'medium')
                     self.parakeet_model = config.get('parakeet_model', 'nemo-parakeet-tdt-0.6b-v2')
+                    self.remote_url = config.get('remote_url', '')
                     self.add_trailing_space = config.get('add_trailing_space', True)
                     self.input_device_index = config.get('input_device_index', None)
                     self.show_overlay = config.get('show_overlay', True)
@@ -1092,6 +1099,7 @@ class CognitiveFlowApp:
             'backend_type': self.backend_type,
             'model_name': self.model_name,
             'parakeet_model': self.parakeet_model,
+            'remote_url': self.remote_url,
             'add_trailing_space': self.add_trailing_space,
             'input_device_index': self.input_device_index,
             'show_overlay': self.show_overlay,
@@ -1119,12 +1127,15 @@ class CognitiveFlowApp:
         self.model_loading = True
 
         def _load():
-            from .backends import get_backend, WhisperBackend, ParakeetBackend
+            from .backends import get_backend, WhisperBackend, ParakeetBackend, RemoteBackend
             _t = time.perf_counter
 
             try:
                 # Determine model name based on backend
-                if self.backend_type == 'parakeet':
+                if self.backend_type == 'remote':
+                    model_name = self.remote_url
+                    backend_class = RemoteBackend
+                elif self.backend_type == 'parakeet':
                     model_name = self.parakeet_model
                     backend_class = ParakeetBackend
                 else:
@@ -1154,7 +1165,10 @@ class CognitiveFlowApp:
                 self.model = self.backend  # Legacy compatibility
 
                 load_time = (_t() - _start) * 1000
-                device = "GPU" if self.using_gpu else "CPU"
+                if isinstance(self.backend, RemoteBackend):
+                    device = "Remote"
+                else:
+                    device = "GPU" if self.using_gpu else "CPU"
 
                 if self.debug:
                     logger.timing(device, "model_load", load_time)
@@ -1193,9 +1207,13 @@ class CognitiveFlowApp:
             except Exception as e:
                 print(f"[Error] Failed to load {self.backend_type}: {e}")
 
-                # If Parakeet failed, clean up corrupted downloads and fall back to Whisper
                 original_backend = self.backend_type
-                if original_backend == 'parakeet':
+                # Don't permanently revert remote if URL is just unconfigured
+                remote_unconfigured = (original_backend == 'remote' and not self.remote_url)
+
+                if original_backend == 'remote':
+                    print("[Fallback] Remote server failed - falling back to Whisper")
+                elif original_backend == 'parakeet':
                     print("[Fallback] Parakeet failed - reverting to Whisper")
                     # Clean up any corrupted/partial downloads
                     from .backends import ParakeetBackend
@@ -1216,13 +1234,18 @@ class CognitiveFlowApp:
 
                     self.model = self.backend
                     self.model_name = fallback_model
-                    self.backend_type = "whisper"
                     self.using_gpu = self.backend.using_gpu
 
-                    # Save config so we don't try failed backend on next startup
-                    if original_backend != 'whisper':
-                        self.save_config()
-                        print(f"[Config] Reverted to Whisper ({fallback_model})")
+                    if remote_unconfigured:
+                        # Keep backend_type as 'remote' so user can configure URL later
+                        # Just use Whisper as runtime fallback without persisting
+                        print(f"[Config] Using Whisper ({fallback_model}) until remote server is configured")
+                    else:
+                        self.backend_type = "whisper"
+                        # Save config so we don't try failed backend on next startup
+                        if original_backend != 'whisper':
+                            self.save_config()
+                            print(f"[Config] Reverted to Whisper ({fallback_model})")
 
                     device = "GPU" if self.using_gpu else "CPU"
                     print(f"[Ready] Using Whisper {fallback_model} ({device})")
@@ -1241,12 +1264,14 @@ class CognitiveFlowApp:
         threading.Thread(target=_load, daemon=True).start()
 
     def warmup_gpu(self):
-        """Run a silent warmup transcription to re-initialize GPU after sleep/wake."""
+        """Run a silent warmup transcription to re-initialize GPU/server after sleep/wake."""
         if self.model_loading:
             return  # Already loading
         if not self.backend or not self.backend.is_loaded:
             return  # No model loaded
-        if not self.using_gpu:
+        # Remote backends benefit from a wake ping too (re-establishes connectivity)
+        is_remote = getattr(self.backend, 'name', '') == 'remote'
+        if not self.using_gpu and not is_remote:
             return  # CPU doesn't need warmup
 
         def _warmup():
@@ -1378,8 +1403,8 @@ class CognitiveFlowApp:
         self.frames = []
         self.record_start_time = time.time()
 
-        # Wake GPU while user is still talking (free warmup window)
-        if self.backend and self.backend.using_gpu:
+        # Wake GPU/server while user is still talking (free warmup window)
+        if self.backend and (self.backend.using_gpu or self.backend.name == 'remote'):
             threading.Thread(target=self.backend.warmup, daemon=True).start()
 
         # Pause media if enabled - but only if audio is actually playing
