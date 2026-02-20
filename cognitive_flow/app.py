@@ -1567,7 +1567,7 @@ class CognitiveFlowApp:
                 if hasattr(self.backend, 'last_timings'):
                     rt = self.backend.last_timings
                     _timings['net_encode'] = rt['encode_ms']
-                    _timings['net_payload_kb'] = rt['payload_kb']
+                    _timings['net_upload'] = rt['payload_kb']  # logged separately as KB
                     _timings['net_server'] = rt['server_ms']
                     _timings['net_overhead'] = rt['overhead_ms']
 
@@ -1617,8 +1617,11 @@ class CognitiveFlowApp:
                     if self.debug:
                         # Verbose debug output with timings
                         logger.success("Done", f"{words} words, {chars} chars ({mode})")
-                        for name, ms in _timings.items():
-                            logger.timing("Pipeline", name, ms)
+                        for name, value in _timings.items():
+                            if name == 'net_upload':
+                                logger.info("Pipeline", f"{name}: {value:.1f}KB")
+                            else:
+                                logger.timing("Pipeline", name, value)
                         logger.info("Text", f'"{preview}"')
                     else:
                         # Concise but useful
