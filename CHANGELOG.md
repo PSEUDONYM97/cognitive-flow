@@ -160,3 +160,7 @@ All notable changes to Cognitive Flow are documented here.
 - Fix multipart form field name ('file' -> 'audio') for server compatibility
 - Fix Test Connection button never showing results (thread-safe signal)
 - Add network pipeline timing: encode, payload size, server vs overhead breakdown
+
+## v1.17.2
+- Network timing breakdown now appears in pipeline log (not just standalone [Remote] line)
+- Pipeline shows net_encode, net_payload_kb, net_server, net_overhead alongside standard steps
