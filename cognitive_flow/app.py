@@ -1276,20 +1276,18 @@ class CognitiveFlowApp:
 
         def _warmup():
             try:
-                import numpy as np
-                print("[Warmup] Re-initializing GPU after wake...")
+                print("[Warmup] Re-initializing after wake...")
 
                 if self.ui:
                     self.ui.set_state("processing", "Warming up...")
 
-                # Generate 1 second of silence
-                warmup_audio = np.zeros(16000, dtype=np.float32)
-
                 _start = time.perf_counter()
-                self.backend.transcribe(warmup_audio, sample_rate=16000)
+                # Use backend's own warmup (smart health check + model pre-load for remote,
+                # GPU silence transcription for local backends)
+                self.backend.warmup()
                 warmup_time = (time.perf_counter() - _start) * 1000
 
-                print(f"[Warmup] GPU ready in {warmup_time:.0f}ms")
+                print(f"[Warmup] Ready in {warmup_time:.0f}ms")
 
                 if self.ui:
                     self.ui.set_state("idle", "Ready")
