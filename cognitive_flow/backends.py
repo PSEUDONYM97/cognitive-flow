@@ -514,8 +514,10 @@ class RemoteBackend(TranscriptionBackend):
         )
 
         _network_start = _t()
+        max_retries = 3 if self._warmup_succeeded else 0
+        retry_delays = [0.5, 1.0, 2.0]  # backoff: 0.5s, 1s, 2s (3.5s total max)
         data = None
-        for _attempt in range(2):
+        for _attempt in range(1 + max_retries):
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
@@ -528,12 +530,12 @@ class RemoteBackend(TranscriptionBackend):
                 if 'timed out' in reason.lower() or isinstance(e, TimeoutError):
                     raise RuntimeError(f"Server timed out ({timeout}s) - server may still be loading model")
                 # Transient connection error (e.g. WinError 10054 after model load)
-                # Retry once if server was confirmed alive during warmup
-                if _attempt == 0 and self._warmup_succeeded:
-                    print(f"[Remote] Connection reset, retrying...")
-                    time.sleep(0.5)
+                if _attempt < max_retries:
+                    delay = retry_delays[_attempt]
+                    print(f"[Remote] Connection reset, retry {_attempt + 1}/{max_retries} in {delay}s...")
+                    time.sleep(delay)
                     continue
-                raise RuntimeError(f"Connection failed: {reason}")
+                raise RuntimeError(f"Connection failed after {_attempt + 1} attempts: {reason}")
         network_ms = (_t() - _network_start) * 1000
 
         # Successful transcription confirms server is warm and reachable

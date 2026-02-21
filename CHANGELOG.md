@@ -186,3 +186,8 @@ All notable changes to Cognitive Flow are documented here.
 - Auto-retry on transient connection reset after successful warmup
 - Catches WinError 10054 (Docker networking hiccup after model load)
 - Also catches OSError during response read (not just URLError during connect)
+
+## v1.18.3
+- Retry loop with backoff for transient connection errors (3 retries: 0.5s, 1s, 2s)
+- Only retries when warmup confirmed server alive, no retries for cold/unknown state
+- Shows retry attempt count in logs: "retry 1/3 in 0.5s..."
