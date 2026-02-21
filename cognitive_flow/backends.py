@@ -514,17 +514,26 @@ class RemoteBackend(TranscriptionBackend):
         )
 
         _network_start = _t()
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8', errors='replace')
-            raise RuntimeError(f"Server returned {e.code}: {error_body}")
-        except (urllib.error.URLError, TimeoutError) as e:
-            reason = str(getattr(e, 'reason', e))
-            if 'timed out' in reason.lower() or isinstance(e, TimeoutError):
-                raise RuntimeError(f"Server timed out ({timeout}s) - server may still be loading model")
-            raise RuntimeError(f"Connection failed: {reason}")
+        data = None
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                break
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode('utf-8', errors='replace')
+                raise RuntimeError(f"Server returned {e.code}: {error_body}")
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                reason = str(getattr(e, 'reason', e))
+                if 'timed out' in reason.lower() or isinstance(e, TimeoutError):
+                    raise RuntimeError(f"Server timed out ({timeout}s) - server may still be loading model")
+                # Transient connection error (e.g. WinError 10054 after model load)
+                # Retry once if server was confirmed alive during warmup
+                if _attempt == 0 and self._warmup_succeeded:
+                    print(f"[Remote] Connection reset, retrying...")
+                    time.sleep(0.5)
+                    continue
+                raise RuntimeError(f"Connection failed: {reason}")
         network_ms = (_t() - _network_start) * 1000
 
         # Successful transcription confirms server is warm and reachable

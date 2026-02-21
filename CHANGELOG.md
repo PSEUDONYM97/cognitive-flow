@@ -181,3 +181,8 @@ All notable changes to Cognitive Flow are documented here.
 ## v1.18.1
 - Wake warmup uses backend's smart warmup path instead of raw transcribe()
 - Remote server wake now checks health + pre-loads model (was bypassing smart logic)
+
+## v1.18.2
+- Auto-retry on transient connection reset after successful warmup
+- Catches WinError 10054 (Docker networking hiccup after model load)
+- Also catches OSError during response read (not just URLError during connect)
