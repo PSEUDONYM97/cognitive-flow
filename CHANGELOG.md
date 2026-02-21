@@ -188,6 +188,6 @@ All notable changes to Cognitive Flow are documented here.
 - Also catches OSError during response read (not just URLError during connect)
 
 ## v1.18.3
-- Retry loop with backoff for transient connection errors (3 retries: 0.5s, 1s, 2s)
+- Retry loop with backoff for transient connection errors (3 retries: 5s, 10s, 15s)
 - Only retries when warmup confirmed server alive, no retries for cold/unknown state
-- Shows retry attempt count in logs: "retry 1/3 in 0.5s..."
+- Shows retry attempt count in logs: "retry 1/3 in 5s..."

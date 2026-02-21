@@ -515,7 +515,7 @@ class RemoteBackend(TranscriptionBackend):
 
         _network_start = _t()
         max_retries = 3 if self._warmup_succeeded else 0
-        retry_delays = [0.5, 1.0, 2.0]  # backoff: 0.5s, 1s, 2s (3.5s total max)
+        retry_delays = [5, 10, 15]  # backoff: 5s, 10s, 15s (30s total max)
         data = None
         for _attempt in range(1 + max_retries):
             try:
