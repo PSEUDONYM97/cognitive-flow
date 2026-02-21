@@ -177,3 +177,7 @@ All notable changes to Cognitive Flow are documented here.
 - Adaptive timeout: 30s when server ready, 10s fast-fail when unreachable, 120s cold-start safety net
 - UI feedback: shows "Server loading..." during cold start, "Server unreachable..." when down
 - Error status in indicator: "Server timeout!", "Server down!" instead of silent reset
+
+## v1.18.1
+- Wake warmup uses backend's smart warmup path instead of raw transcribe()
+- Remote server wake now checks health + pre-loads model (was bypassing smart logic)
