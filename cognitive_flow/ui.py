@@ -1203,7 +1203,11 @@ class FloatingIndicator(QWidget):
         self._update_position()
 
     def ensure_visible(self):
-        """Force the indicator to be visible and properly positioned"""
+        """Force the indicator to be visible and properly positioned.
+
+        Must be called from the Qt main thread (use CognitiveFlowUI.show()
+        or reset_position() for thread-safe access from other threads).
+        """
         # Refresh screen geometry in case display changed
         self.refresh_geometry()
         # Ensure opacity is 1
@@ -1211,17 +1215,11 @@ class FloatingIndicator(QWidget):
         # Show and raise to top
         self.show()
         self.raise_()
-        self.activateWindow()
-        # Force immediate repaint (not just scheduled)
-        self.repaint()
-        # Process events to flush the repaint to the compositor
-        QApplication.processEvents()
-        # Nudge position slightly to force Windows compositor refresh
+        # Nudge position to force Windows compositor refresh
         current_pos = self.pos()
         self.move(current_pos.x() + 1, current_pos.y())
-        QApplication.processEvents()
         self.move(current_pos)
-        QApplication.processEvents()
+        self.update()
         print(f"[UI] ensure_visible: pos=({self.x()}, {self.y()}) opacity={self.windowOpacity()} visible={self.isVisible()}")
     
     def _collapse(self):
@@ -1521,6 +1519,9 @@ class CognitiveFlowUI(QObject):
     state_changed = pyqtSignal(str, str)
     audio_level_changed = pyqtSignal(float)  # 0.0 to 1.0
     show_settings_signal = pyqtSignal()
+    show_indicator_signal = pyqtSignal()
+    hide_indicator_signal = pyqtSignal()
+    reset_indicator_signal = pyqtSignal()
     
     def __init__(self, app):
         # Create QApplication FIRST before calling super().__init__()
@@ -1539,6 +1540,9 @@ class CognitiveFlowUI(QObject):
         self.state_changed.connect(self._update_indicator_state, Qt.ConnectionType.QueuedConnection)
         self.audio_level_changed.connect(self._update_audio_level, Qt.ConnectionType.QueuedConnection)
         self.show_settings_signal.connect(self._show_settings_on_main_thread, Qt.ConnectionType.QueuedConnection)
+        self.show_indicator_signal.connect(self._show_indicator, Qt.ConnectionType.QueuedConnection)
+        self.hide_indicator_signal.connect(self._hide_indicator, Qt.ConnectionType.QueuedConnection)
+        self.reset_indicator_signal.connect(self._reset_indicator, Qt.ConnectionType.QueuedConnection)
     
     def start(self):
         """Start Qt application"""
@@ -1565,13 +1569,10 @@ class CognitiveFlowUI(QObject):
         self.audio_level_changed.emit(level)
 
     def set_state(self, state: str, status_text: str | None = None):
-        """Update state"""
+        """Update state (thread-safe via QueuedConnection signal)"""
         if status_text is None:
             status_text = ""
         self.state_changed.emit(state, status_text)
-        # Force immediate Qt event processing to ensure state change is visible
-        if self.qt_app:
-            self.qt_app.processEvents()
     
     def get_last_transcription(self):
         """Get last transcription"""
@@ -1585,19 +1586,36 @@ class CognitiveFlowUI(QObject):
         self.history.add(text, duration, audio_file)
     
     def show(self):
-        """Show the overlay indicator"""
+        """Show the overlay indicator (thread-safe)"""
+        self.show_indicator_signal.emit()
+
+    def hide(self):
+        """Hide the overlay indicator (thread-safe)"""
+        self.hide_indicator_signal.emit()
+
+    def reset_position(self):
+        """Reset indicator position (thread-safe)"""
+        self.reset_indicator_signal.emit()
+
+    def _show_indicator(self):
+        """Show indicator - called on Qt main thread"""
         if self.indicator:
             self.indicator.ensure_visible()
-    
-    def hide(self):
-        """Hide the overlay indicator"""
+
+    def _hide_indicator(self):
+        """Hide indicator - called on Qt main thread"""
         if self.indicator:
             self.indicator.hide()
-    
+
+    def _reset_indicator(self):
+        """Reset indicator position - called on Qt main thread"""
+        if self.indicator:
+            self.indicator.ensure_visible()
+
     def show_settings(self):
         """Show settings dialog - thread safe"""
         self.show_settings_signal.emit()
-    
+
     def _show_settings_on_main_thread(self):
         """Actually show settings - called on Qt main thread"""
         # Always create fresh dialog (old one may be in bad state after close)
