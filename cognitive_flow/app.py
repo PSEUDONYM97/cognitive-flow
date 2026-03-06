@@ -818,9 +818,9 @@ class SystemTray:
 
     def on_reset_overlay(self, icon, item):
         """Reset overlay position and visibility - use if indicator goes missing"""
-        if self.app.ui and self.app.ui.indicator:
+        if self.app.ui:
             self.app.show_overlay = True
-            self.app.ui.indicator.ensure_visible()
+            self.app.ui.reset_position()  # Thread-safe via signal
             print("[Settings] Overlay position reset")
     
     def run(self):
@@ -981,9 +981,12 @@ class VirtualKeyboard:
         focus = user32.GetFocus()
         target = focus if focus else hwnd
         
-        # Post WM_CHAR for each character
-        for char in text:
+        # Post WM_CHAR for each character, with batching to prevent message flood
+        for i, char in enumerate(text):
             user32.PostMessageW(target, WM_CHAR, ord(char), 0)
+            # Pause every 100 chars to let target window process messages
+            if (i + 1) % 100 == 0:
+                time.sleep(0.001)
         
         # Detach from thread
         if attached:

@@ -191,3 +191,10 @@ All notable changes to Cognitive Flow are documented here.
 - Retry loop with backoff for transient connection errors (3 retries: 5s, 10s, 15s)
 - Only retries when warmup confirmed server alive, no retries for cold/unknown state
 - Shows retry attempt count in logs: "retry 1/3 in 5s..."
+
+## v1.19.0
+- Fix UI lockups caused by Qt processEvents() called from background threads
+- All tray callbacks (reset overlay, toggle overlay) now thread-safe via signals
+- Removed processEvents() from set_state() - was corrupting Qt state from transcription/model threads
+- Removed activateWindow() and processEvents() from ensure_visible() - caused focus stealing and deadlocks
+- Batch WM_CHAR typing (pause every 100 chars) to prevent message flood on long transcriptions
