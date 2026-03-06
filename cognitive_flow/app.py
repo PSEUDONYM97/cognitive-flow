@@ -101,6 +101,8 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 VK_OEM_3 = 0xC0  # Tilde key
 VK_ESCAPE = 0x1B  # Escape key
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
 
 # Wake detection
 WAKE_THRESHOLD_SECONDS = 30  # If loop blocked for 30s+, assume sleep/wake
@@ -166,6 +168,8 @@ class INPUT(ctypes.Structure):
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 
 SetWindowsHookExW = user32.SetWindowsHookExW
 UnhookWindowsHookEx = user32.UnhookWindowsHookEx
@@ -816,6 +820,14 @@ class SystemTray:
                 self.app.ui.hide()
         print(f"[Settings] Overlay: {'visible' if self.app.show_overlay else 'hidden'}")
 
+    def on_toggle_hotkey(self, icon, item):
+        """Toggle tilde hotkey on/off (Ctrl+~ also works)"""
+        self.app.hotkey_enabled = not self.app.hotkey_enabled
+        state = "enabled" if self.app.hotkey_enabled else "disabled"
+        print(f"[Hotkey] Tilde recording {state}")
+        if self.app.ui:
+            self.app.ui.set_state("idle", f"Hotkey {state}")
+
     def on_reset_overlay(self, icon, item):
         """Reset overlay position and visibility - use if indicator goes missing"""
         if self.app.ui:
@@ -829,6 +841,11 @@ class SystemTray:
         
         menu = pystray.Menu(
             pystray.MenuItem("Settings", self.on_show_stats),
+            pystray.MenuItem(
+                "Hotkey Enabled",
+                self.on_toggle_hotkey,
+                checked=lambda item: self.app.hotkey_enabled if self.app else True
+            ),
             pystray.MenuItem(
                 "Show Overlay",
                 self.on_toggle_overlay,
@@ -1031,6 +1048,9 @@ class CognitiveFlowApp:
         # Double-escape tracking for cancel
         self._last_escape_time: float = 0.0
         self._escape_window: float = 0.5  # 500ms window for double-escape
+
+        # Hotkey enabled (Ctrl+~ to toggle, lets tilde pass through when disabled)
+        self.hotkey_enabled = True
         
         self.tray: SystemTray | None = None
         if HAS_TRAY:
@@ -1048,6 +1068,7 @@ class CognitiveFlowApp:
             logger.info("Stats", self.stats.summary())
             logger.separator()
             logger.info("Controls", "~ (tilde) - Start/stop recording")
+            logger.info("Controls", "Ctrl+~ - Toggle hotkey on/off (pass tilde through)")
             logger.info("Controls", "Tray > Quit - Exit application")
             logger.info("Controls", "Right-click - Open settings")
             logger.separator()
@@ -1307,8 +1328,21 @@ class CognitiveFlowApp:
             kb = lParam.contents
             if kb.vkCode == VK_OEM_3:
                 if wParam == WM_KEYDOWN:
-                    self.toggle_recording()
-                    return 1
+                    # Ctrl+~ toggles hotkey on/off
+                    ctrl_down = (user32.GetAsyncKeyState(VK_LCONTROL) & 0x8000 or
+                                 user32.GetAsyncKeyState(VK_RCONTROL) & 0x8000)
+                    if ctrl_down:
+                        self.hotkey_enabled = not self.hotkey_enabled
+                        state = "enabled" if self.hotkey_enabled else "disabled"
+                        print(f"[Hotkey] Tilde recording {state}")
+                        if self.ui:
+                            self.ui.set_state("idle", f"Hotkey {state}")
+                        return 1
+                    if self.hotkey_enabled:
+                        self.toggle_recording()
+                        return 1
+                # Not enabled - let tilde pass through
+                return CallNextHookEx(self.hook, nCode, wParam, lParam)
             elif kb.vkCode == VK_ESCAPE:
                 if wParam == WM_KEYDOWN and self.is_recording:
                     current_time = time.time()

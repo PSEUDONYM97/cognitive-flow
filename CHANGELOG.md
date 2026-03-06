@@ -192,6 +192,12 @@ All notable changes to Cognitive Flow are documented here.
 - Only retries when warmup confirmed server alive, no retries for cold/unknown state
 - Shows retry attempt count in logs: "retry 1/3 in 5s..."
 
+## v1.20.0
+- Hotkey toggle: Ctrl+~ disables/enables tilde recording
+- When disabled, tilde key passes through normally for typing
+- Toggle also available in system tray menu (Hotkey Enabled checkbox)
+- Indicator shows "Hotkey enabled/disabled" on toggle
+
 ## v1.19.0
 - Fix UI lockups caused by Qt processEvents() called from background threads
 - All tray callbacks (reset overlay, toggle overlay) now thread-safe via signals
