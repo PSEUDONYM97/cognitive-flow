@@ -1413,6 +1413,9 @@ class CognitiveFlowApp:
             self._clipboard_mode = clipboard_mode
             self.start_recording()
         else:
+            # Click-to-stop while recording switches to clipboard mode
+            if clipboard_mode:
+                self._clipboard_mode = True
             self.stop_recording()
     
     def _cancel_state_reset(self):
@@ -1769,8 +1772,8 @@ class CognitiveFlowApp:
                 if processed_text:
                     _start = _t()
                     output_text = processed_text + " " if self.add_trailing_space else processed_text
-                    VirtualKeyboard.type_text(output_text)
-                    _timings['typing'] = (_t() - _start) * 1000
+                    VirtualKeyboard.copy_to_clipboard(output_text)
+                    _timings['clipboard'] = (_t() - _start) * 1000
 
                     total_pipeline = (_t() - pipeline_start) * 1000
                     _timings['total'] = total_pipeline
@@ -1780,7 +1783,7 @@ class CognitiveFlowApp:
                         self.ui.add_transcription(processed_text, duration, target_file)
 
                     words = len(processed_text.split())
-                    logger.success("Retry", f"{words} words from {target_file}")
+                    logger.success("Retry", f"{words} words copied to clipboard from {target_file}")
 
                     if self.debug:
                         for name, value in _timings.items():
@@ -1793,7 +1796,7 @@ class CognitiveFlowApp:
                             else:
                                 logger.timing("Pipeline", name, value)
                     if self.ui:
-                        self.ui.set_state("idle", f"{words} words")
+                        self.ui.set_state("idle", f"Copied! {words}w")
                         self._schedule_state_reset()
                 else:
                     logger.warning("Retry", "No speech detected")
