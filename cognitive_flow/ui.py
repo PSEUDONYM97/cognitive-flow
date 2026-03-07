@@ -1105,7 +1105,12 @@ class FloatingIndicator(QWidget):
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.timeout.connect(self._collapse)
-        
+
+        # Visibility heartbeat - recover from compositor/sleep/fullscreen hiding
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.timeout.connect(self._heartbeat)
+        self._heartbeat_timer.start(30000)  # Every 30 seconds
+
         # Width animation
         self._width_animation = QPropertyAnimation(self, b"indicator_width")
         self._width_animation.setDuration(250)
@@ -1248,6 +1253,23 @@ class FloatingIndicator(QWidget):
         self._collapse_timer.stop()
         self._collapse_timer.start(self.COLLAPSE_DELAY_MS)
     
+    def _heartbeat(self):
+        """Periodic check to recover from invisible state"""
+        if not self.isVisible():
+            print("[UI] Heartbeat: indicator was hidden, recovering")
+            self.refresh_geometry()
+            self.show()
+            self.raise_()
+        # Also check if we've drifted off-screen (display change, DPI change)
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            if self.x() > geom.right() or self.y() > geom.bottom() or self.x() + self.width() < geom.x():
+                print(f"[UI] Heartbeat: indicator off-screen at ({self.x()}, {self.y()}), repositioning")
+                self._screen_geometry = geom
+                self._base_y = geom.y() + geom.height() - self.height() - self._margin
+                self._update_position()
+
     def get_hover_opacity(self):
         return self._hover_opacity
     
@@ -1408,6 +1430,10 @@ class FloatingIndicator(QWidget):
             # Expand immediately when active
             self._collapse_timer.stop()
             self._expand()
+            # Ensure window is visible (may have been lost to compositor/sleep/fullscreen)
+            if not self.isVisible():
+                self.show()
+                self.raise_()
         elif state == "idle":
             # Start collapse timer when idle
             self._start_collapse_timer()
