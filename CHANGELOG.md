@@ -192,6 +192,11 @@ All notable changes to Cognitive Flow are documented here.
 - Only retries when warmup confirmed server alive, no retries for cold/unknown state
 - Shows retry attempt count in logs: "retry 1/3 in 5s..."
 
+## v1.21.0
+- Retry always copies to clipboard instead of typing
+- Click indicator to stop recording switches to clipboard mode (tilde start + click stop = clipboard)
+- Server model upgraded to parakeet-tdt-0.6b-v2 (punctuation, capitalization, better accuracy)
+
 ## v1.20.1
 - Fix: Indicator self-healing - recovers from being hidden by compositor/sleep/fullscreen
 - set_state re-shows window when transitioning to active states (recording/processing)
