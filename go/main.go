@@ -134,9 +134,13 @@ var (
 	pWaveInStop            = winmm.NewProc("waveInStop")
 	pWaveInReset           = winmm.NewProc("waveInReset")
 
-	pCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
-	pDeleteObject     = gdi32.NewProc("DeleteObject")
-	pCreateDIBSection = gdi32.NewProc("CreateDIBSection")
+	pCreateSolidBrush    = gdi32.NewProc("CreateSolidBrush")
+	pDeleteObject        = gdi32.NewProc("DeleteObject")
+	pCreateDIBSection    = gdi32.NewProc("CreateDIBSection")
+	pCreateCompatibleDC  = gdi32.NewProc("CreateCompatibleDC")
+	pSelectObject        = gdi32.NewProc("SelectObject")
+	pDeleteDC            = gdi32.NewProc("DeleteDC")
+	pUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
 
 	pShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 )
@@ -144,7 +148,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.0.1"
+	version = "2.1.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -374,7 +378,7 @@ func main() {
 
 	// Create UI
 	createBar()
-	createDot()
+	createIndicator()
 	createTray()
 
 	// Keyboard hook
@@ -941,8 +945,7 @@ func copyToClipboard(text string) {
 // Click-through (WS_EX_TRANSPARENT), always on top, invisible when idle.
 
 const (
-	barMinHeight = 4
-	barMaxHeight = 32
+	barHeight    = 6
 	timerRepaint = 2
 )
 
@@ -955,32 +958,27 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 
 		p := currentPhase()
 		var color uintptr
-		var h int32
 
 		switch p {
 		case phaseRecording:
 			level := audioLevel.Load()
-			// Bar height scales with audio level
-			h = barMinHeight + int32(level)*(barMaxHeight-barMinHeight)/100
-			// Color: green (quiet) -> amber (good) -> red (loud)
 			switch {
-			case level < 20:
-				color = 0x0050AF4C // Green (BGR)
-			case level < 60:
-				color = 0x0000BFFF // Amber (BGR)
+			case level < 15:
+				color = 0x003643F4 // Red dim
+			case level < 50:
+				color = 0x002030F4 // Red bright
 			default:
-				color = 0x003643F4 // Red (BGR)
+				color = 0x001020FF // Red hot
 			}
 		case phaseProcessing:
-			h = barMinHeight
 			color = 0x0000BFFF // Amber
 		default:
-			h = 0
+			color = 0
 		}
 
-		if h > 0 {
+		if color != 0 {
 			brush, _, _ := pCreateSolidBrush.Call(color)
-			r := [4]int32{0, 0, int32(sw), h}
+			r := [4]int32{0, 0, int32(sw), barHeight}
 			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
 			pDeleteObject.Call(brush)
 		}
@@ -990,13 +988,7 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 
 	case wmTimer:
 		if wp == timerRepaint {
-			// Repaint bar with current audio level
 			pInvalidateRect.Call(hwnd, 0, 1)
-			// Resize bar to match current level
-			sw, _, _ := pGetSystemMetrics.Call(0)
-			level := audioLevel.Load()
-			h := barMinHeight + int32(level)*(barMaxHeight-barMinHeight)/100
-			pMoveWindow.Call(hwnd, 0, 0, sw, uintptr(h), 1)
 			return 0
 		}
 		if wp == timerHeartbeat {
@@ -1033,7 +1025,7 @@ func createBar() {
 	hwnd, _, _ := pCreateWindowEx.Call(
 		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
 		uintptr(unsafe.Pointer(cls)), 0,
-		wsPopup, 0, 0, sw, uintptr(barMaxHeight), 0, 0, 0, 0,
+		wsPopup, 0, 0, sw, barHeight, 0, 0, 0, 0,
 	)
 	state.bar = hwnd
 
@@ -1046,81 +1038,90 @@ func createBar() {
 	pSetTimer.Call(hwnd, timerHeartbeat, 30000, 0)
 }
 
-// ----- Clickable indicator dot -----
-// Always visible in bottom-right corner. Click to record (clipboard mode) or stop.
-// Draggable. Shows state: green=idle, gray=disabled, red=recording, amber=processing.
+// ----- Per-pixel alpha indicator -----
+// Software-rendered overlay with anti-aliased dot, glow, and pulsing.
+// Uses UpdateLayeredWindow for true per-pixel transparency.
 
-const dotSize = 48
+const (
+	indSize       = 56            // window size
+	indDotRadius  = 10.0          // dot radius in pixels
+	indGlowMin    = 13.0          // minimum glow radius
+	indGlowMax    = 24.0          // maximum glow radius (loud audio)
+	timerIndAnim  = 3             // animation timer ID
+	ulwAlpha      = 0x00000002    // ULW_ALPHA flag
+	wmLButtonDown = 0x0201
+	wmMouseMove   = 0x0200
+)
 
-var dotProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
+var ind struct {
+	hwnd    uintptr
+	memDC   uintptr
+	dib     uintptr
+	pixels  []byte // BGRA premultiplied, top-down
+	frame   int
+	dragX   int16  // mouse-down position for click vs drag
+	dragY   int16
+	dragging bool
+}
+
+type indColor struct{ r, g, b float64 }
+
+var (
+	colGreen = indColor{76, 175, 80}
+	colRed   = indColor{229, 57, 53}
+	colAmber = indColor{251, 176, 59}
+	colGray  = indColor{120, 120, 120}
+)
+
+var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 	switch uint32(umsg) {
-	case wmPaint:
-		var ps paintstruct
-		hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-
-		// Background: transparent (black will be color-keyed out)
-		bgBrush, _, _ := pCreateSolidBrush.Call(0)
-		r := [4]int32{0, 0, dotSize, dotSize}
-		pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), bgBrush)
-		pDeleteObject.Call(bgBrush)
-
-		// Dot color based on state
-		var color uintptr
-		p := currentPhase()
-		switch {
-		case !state.enabled:
-			color = 0x00808080 // Gray
-		case p == phaseRecording:
-			level := audioLevel.Load()
-			switch {
-			case level < 20:
-				color = 0x003643F4 // Red (quiet - still recording)
-			case level < 60:
-				color = 0x003643F4 // Red
-			default:
-				color = 0x001428F4 // Bright red (loud)
-			}
-		case p == phaseProcessing:
-			color = 0x0000BFFF // Amber
-		default:
-			color = 0x0050AF4C // Green
-		}
-
-		// Draw filled circle
-		pSelectObject := gdi32.NewProc("SelectObject")
-		pEllipse := gdi32.NewProc("Ellipse")
-		brush, _, _ := pCreateSolidBrush.Call(color)
-		pSelectObject.Call(hdc, brush)
-		// Null pen for no border
-		pCreatePen := gdi32.NewProc("CreatePen")
-		pen, _, _ := pCreatePen.Call(5, 0, 0) // PS_NULL
-		pSelectObject.Call(hdc, pen)
-		margin := int32(4)
-		pEllipse.Call(hdc, uintptr(margin), uintptr(margin), uintptr(dotSize-margin), uintptr(dotSize-margin))
-		pDeleteObject.Call(brush)
-		pDeleteObject.Call(pen)
-
-		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+	case wmLButtonDown:
+		ind.dragX = int16(lp & 0xFFFF)
+		ind.dragY = int16(lp >> 16 & 0xFFFF)
+		ind.dragging = false
+		// Capture mouse for drag tracking
+		pSetCapture := user32.NewProc("SetCapture")
+		pSetCapture.Call(hwnd)
 		return 0
 
-	case wmNcHitTest:
-		// Allow dragging by treating the whole window as caption
-		return htCaption
+	case wmMouseMove:
+		if wp&0x0001 != 0 { // MK_LBUTTON
+			mx, my := int16(lp&0xFFFF), int16(lp>>16&0xFFFF)
+			dx, dy := mx-ind.dragX, my-ind.dragY
+			if !ind.dragging && (dx*dx+dy*dy > 9) {
+				ind.dragging = true
+			}
+			if ind.dragging {
+				// Move window by delta
+				var rc [4]int32
+				pGetWindowRect := user32.NewProc("GetWindowRect")
+				pGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
+				nx := rc[0] + int32(dx)
+				ny := rc[1] + int32(dy)
+				pSetWindowPos.Call(hwnd, 0, uintptr(nx), uintptr(ny), 0, 0, 0x0001|0x0004|0x0010)
+			}
+		}
+		return 0
 
 	case wmLButtonUp:
-		// Click: start clipboard recording or stop current recording
-		go func() {
-			if currentPhase() == phaseRecording {
-				toggle(true) // stop + clipboard mode
-			} else if state.enabled {
-				toggle(true) // start clipboard recording
-			}
-		}()
+		pReleaseCapture := user32.NewProc("ReleaseCapture")
+		pReleaseCapture.Call()
+		if !ind.dragging {
+			// Click: toggle clipboard recording
+			go func() {
+				if currentPhase() == phaseRecording {
+					toggle(true)
+				} else if state.enabled {
+					toggle(true)
+				}
+			}()
+		}
+		ind.dragging = false
 		return 0
 
 	case wmTimer:
-		if wp == timerRepaint {
-			pInvalidateRect.Call(hwnd, 0, 1)
+		if wp == timerIndAnim {
+			renderIndicator()
 		}
 		return 0
 	}
@@ -1129,35 +1130,168 @@ var dotProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 	return r
 })
 
-func createDot() {
-	cls := utf16p("CogFlowDot")
+func createIndicator() {
+	cls := utf16p("CogFlowInd")
 	cursor, _, _ := pLoadCursor.Call(0, 32649) // IDC_HAND
 	wc := wndclass{
-		Size: uint32(unsafe.Sizeof(wndclass{})), WndProc: dotProc,
+		Size: uint32(unsafe.Sizeof(wndclass{})), WndProc: indProc,
 		ClassName: cls, Cursor: cursor,
 	}
 	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
-	sw, _, _ := pGetSystemMetrics.Call(0) // SM_CXSCREEN
-	sh, _, _ := pGetSystemMetrics.Call(1) // SM_CYSCREEN
-
-	// Bottom-right corner with some margin
-	x := int(sw) - dotSize - 20
-	y := int(sh) - dotSize - 60
+	sw, _, _ := pGetSystemMetrics.Call(0)
+	sh, _, _ := pGetSystemMetrics.Call(1)
+	x := int(sw) - indSize - 24
+	y := int(sh) - indSize - 64
 
 	hwnd, _, _ := pCreateWindowEx.Call(
 		wsExLayered|wsExTopmost|wsExToolWindow,
 		uintptr(unsafe.Pointer(cls)), 0,
-		wsPopup,
-		uintptr(x), uintptr(y), dotSize, dotSize,
+		wsPopup, uintptr(x), uintptr(y), indSize, indSize,
 		0, 0, 0, 0,
 	)
+	ind.hwnd = hwnd
 	state.dot = hwnd
 
-	// Black = transparent (color key), so only the circle is visible
-	pSetLayeredWindowAttr.Call(hwnd, 0, 0, lwaColorKey)
+	// Create memory DC + 32-bit top-down DIB for software rendering
+	screenDC, _, _ := pGetDC.Call(0)
+	ind.memDC, _, _ = pCreateCompatibleDC.Call(screenDC)
+	pReleaseDC.Call(0, screenDC)
 
+	bmi := bmpinfo{
+		Size:   uint32(unsafe.Sizeof(bmpinfo{})),
+		Width:  indSize,
+		Height: -indSize, // negative = top-down
+		Planes: 1,
+		Bits:   32,
+	}
+	var bits uintptr
+	ind.dib, _, _ = pCreateDIBSection.Call(
+		ind.memDC, uintptr(unsafe.Pointer(&bmi)), 0,
+		uintptr(unsafe.Pointer(&bits)), 0, 0,
+	)
+	pSelectObject.Call(ind.memDC, ind.dib)
+
+	ind.pixels = unsafe.Slice((*byte)(unsafe.Pointer(bits)), indSize*indSize*4)
+
+	renderIndicator()
 	pShowWindow.Call(hwnd, 8) // SW_SHOWNA
+
+	// Slow heartbeat timer when idle (redraws on state changes via applyPhase)
+	pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
+}
+
+func renderIndicator() {
+	w := indSize
+	px := ind.pixels
+	cx, cy := float64(w)/2, float64(w)/2
+
+	// Clear to fully transparent
+	for i := range px {
+		px[i] = 0
+	}
+
+	// Determine dot color and glow based on state
+	p := currentPhase()
+	var col indColor
+	var glowR, glowAlpha float64
+	var pulse float64 = 1.0
+
+	switch {
+	case !state.enabled:
+		col = colGray
+		glowR = indGlowMin
+		glowAlpha = 0.15
+	case p == phaseRecording:
+		col = colRed
+		level := float64(audioLevel.Load()) / 100.0
+		glowR = indGlowMin + level*(indGlowMax-indGlowMin)
+		glowAlpha = 0.25 + level*0.35
+		// Pulse: opacity oscillates 0.6 - 1.0 over ~900ms at 30fps
+		pulse = 0.65 + 0.35*math.Sin(float64(ind.frame)*0.21)
+	case p == phaseProcessing:
+		col = colAmber
+		glowR = indGlowMin + 2
+		glowAlpha = 0.3
+		// Slow throb for processing
+		pulse = 0.8 + 0.2*math.Sin(float64(ind.frame)*0.12)
+	default:
+		col = colGreen
+		glowR = indGlowMin
+		glowAlpha = 0.2
+	}
+
+	// Draw glow (radial gradient, premultiplied alpha)
+	for y := 0; y < w; y++ {
+		for x := 0; x < w; x++ {
+			dx, dy := float64(x)-cx+0.5, float64(y)-cy+0.5
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist < glowR && dist > indDotRadius-0.5 {
+				// Smooth falloff from dot edge to glow edge
+				t := (dist - indDotRadius) / (glowR - indDotRadius)
+				if t < 0 {
+					t = 0
+				}
+				a := (1 - t*t) * glowAlpha * pulse // quadratic falloff
+				if a > 0.004 {
+					i := (y*w + x) * 4
+					// Premultiplied BGRA
+					px[i+0] = byte(col.b * a)
+					px[i+1] = byte(col.g * a)
+					px[i+2] = byte(col.r * a)
+					px[i+3] = byte(255 * a)
+				}
+			}
+		}
+	}
+
+	// Draw dot (anti-aliased filled circle, composited over glow)
+	for y := 0; y < w; y++ {
+		for x := 0; x < w; x++ {
+			dx, dy := float64(x)-cx+0.5, float64(y)-cy+0.5
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist < indDotRadius+0.5 {
+				cov := 1.0 // coverage for anti-aliasing
+				if dist > indDotRadius-0.5 {
+					cov = 1.0 - (dist - (indDotRadius - 0.5))
+				}
+				cov *= pulse
+				if cov > 0.004 {
+					i := (y*w + x) * 4
+					// Source: premultiplied dot color
+					sB := col.b / 255 * cov
+					sG := col.g / 255 * cov
+					sR := col.r / 255 * cov
+					sA := cov
+					// Dest: existing glow
+					dB := float64(px[i+0]) / 255
+					dG := float64(px[i+1]) / 255
+					dR := float64(px[i+2]) / 255
+					dA := float64(px[i+3]) / 255
+					// Porter-Duff src-over
+					invA := 1 - sA
+					oA := sA + dA*invA
+					px[i+0] = byte((sB + dB*invA) * 255)
+					px[i+1] = byte((sG + dG*invA) * 255)
+					px[i+2] = byte((sR + dR*invA) * 255)
+					px[i+3] = byte(oA * 255)
+				}
+			}
+		}
+	}
+
+	// Push to screen via UpdateLayeredWindow
+	srcPt := [2]int32{0, 0}
+	sz := [2]int32{int32(w), int32(w)}
+	// BLENDFUNCTION packed as uint32: BlendOp=0, BlendFlags=0, Alpha=255, AlphaFormat=1 (AC_SRC_ALPHA)
+	blend := uint32(0) | uint32(0)<<8 | uint32(255)<<16 | uint32(1)<<24
+	pUpdateLayeredWindow.Call(
+		ind.hwnd, 0, 0, uintptr(unsafe.Pointer(&sz)),
+		ind.memDC, uintptr(unsafe.Pointer(&srcPt)),
+		0, uintptr(unsafe.Pointer(&blend)), ulwAlpha,
+	)
+
+	ind.frame++
 }
 
 func setPhase(p int32) {
@@ -1174,37 +1308,32 @@ func applyPhase(p int32) {
 	switch p {
 	case phaseRecording:
 		audioLevel.Store(0)
+		ind.frame = 0
 		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-		pSetTimer.Call(state.bar, timerRepaint, 50, 0)
-		if state.dot != 0 {
-			pSetTimer.Call(state.dot, timerRepaint, 50, 0)
-			pInvalidateRect.Call(state.dot, 0, 1)
-		}
+		pSetTimer.Call(state.bar, timerRepaint, 200, 0)
+		// 33ms indicator animation (30fps) during recording
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 33, 0)
 	case phaseProcessing:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
-		sw, _, _ := pGetSystemMetrics.Call(0)
-		pMoveWindow.Call(state.bar, 0, 0, sw, barMinHeight, 1)
 		pShowWindow.Call(state.bar, 8)
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-		if state.dot != 0 {
-			pKillTimer.Call(state.dot, timerRepaint)
-			pInvalidateRect.Call(state.dot, 0, 1)
-		}
+		// Slower animation during processing (15fps)
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	default:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
-		if state.dot != 0 {
-			pKillTimer.Call(state.dot, timerRepaint)
-			pInvalidateRect.Call(state.dot, 0, 1)
-		}
+		// Back to slow heartbeat when idle
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 1000, 0)
+		renderIndicator() // immediate update to idle state
 	}
 
 	updateTrayIcon()
+	renderIndicator()
 }
 
 // ----- System tray -----
