@@ -323,8 +323,6 @@ var state struct {
 	trayHwnd uintptr
 	trayNID  notifyicon
 	trayIcon uintptr
-
-	stopCh chan struct{} // signal recordLoop to stop
 }
 
 // ----- Entry point -----
@@ -478,11 +476,22 @@ func cancel() {
 	}
 	log("Cancelled")
 	state.recording = false
-	if state.stopCh != nil {
-		close(state.stopCh)
-		state.stopCh = nil
+	if audio.stopCh != nil {
+		close(audio.stopCh)
+		audio.stopCh = nil
 	}
 	setPhase(phaseIdle)
+}
+
+// ----- Audio device state (owned by startRecording/stopRecording, used by captureLoop) -----
+
+var audio struct {
+	hwi     uintptr
+	event   uintptr
+	bufs    [numBufs][]byte
+	hdrs    [numBufs]wavehdr
+	stopCh  chan struct{}
+	frameCh chan []int16
 }
 
 func startRecording() {
@@ -493,14 +502,46 @@ func startRecording() {
 	// Warm server while user speaks
 	go healthCheck()
 
-	// Start audio capture - recordLoop owns its data, returns frames via channel
-	frameCh := make(chan []int16, 1)
-	state.stopCh = make(chan struct{})
-	go recordLoop(state.stopCh, frameCh)
+	// Open audio device NOW, not in a goroutine. This is the critical path -
+	// every millisecond here is a millisecond of the user's first word lost.
+	wfx := waveformat{
+		Tag: wavePCM, Ch: 1, Rate: sampleRate,
+		BitDepth: 16, BlockAlign: 2, ByteRate: sampleRate * 2,
+	}
 
-	// Wait for stop in a separate goroutine so we don't block the mutex
+	ev, _, _ := pCreateEvent.Call(0, 0, 0, 0)
+	audio.event = ev
+
+	ret, _, _ := pWaveInOpen.Call(
+		uintptr(unsafe.Pointer(&audio.hwi)), waveMapper,
+		uintptr(unsafe.Pointer(&wfx)), ev, 0, callbackEvent,
+	)
+	if ret != 0 {
+		log("waveInOpen failed: MMRESULT %d", ret)
+		state.recording = false
+		setPhase(phaseIdle)
+		return
+	}
+
+	bufSize := chunkSize * 2
+	for i := range audio.bufs {
+		audio.bufs[i] = make([]byte, bufSize)
+		audio.hdrs[i] = wavehdr{Data: uintptr(unsafe.Pointer(&audio.bufs[i][0])), Len: uint32(bufSize)}
+		pWaveInPrepareHeader.Call(audio.hwi, uintptr(unsafe.Pointer(&audio.hdrs[i])), unsafe.Sizeof(audio.hdrs[i]))
+		pWaveInAddBuffer.Call(audio.hwi, uintptr(unsafe.Pointer(&audio.hdrs[i])), unsafe.Sizeof(audio.hdrs[i]))
+	}
+
+	// Audio is capturing from THIS INSTANT
+	pWaveInStart.Call(audio.hwi)
+
+	// Now launch the goroutine that just reads filled buffers
+	audio.stopCh = make(chan struct{})
+	audio.frameCh = make(chan []int16, 1)
+	go captureLoop(audio.hwi, audio.event, &audio.hdrs, &audio.bufs, audio.stopCh, audio.frameCh)
+
+	// Goroutine to receive frames when recording stops
 	go func() {
-		frames := <-frameCh
+		frames := <-audio.frameCh
 
 		state.mu.Lock()
 		clipboard := state.clipboardMode
@@ -525,49 +566,20 @@ func stopRecording() {
 	}
 	log("Stopped")
 	state.recording = false
-	if state.stopCh != nil {
-		close(state.stopCh)
-		state.stopCh = nil
+
+	// Signal capture loop to stop, then stop the device
+	if audio.stopCh != nil {
+		close(audio.stopCh)
+		audio.stopCh = nil
 	}
 }
 
-// ----- Audio capture -----
-// recordLoop owns all audio data. No shared mutable state.
-// It sends captured frames back through frameCh when done.
+// ----- Audio capture loop -----
+// Only reads filled buffers. Device is already open and recording.
 
-func recordLoop(stop chan struct{}, frameCh chan<- []int16) {
-	wfx := waveformat{
-		Tag: wavePCM, Ch: 1, Rate: sampleRate,
-		BitDepth: 16, BlockAlign: 2, ByteRate: sampleRate * 2,
-	}
-
-	ev, _, _ := pCreateEvent.Call(0, 0, 0, 0)
-	var hwi uintptr
-	ret, _, _ := pWaveInOpen.Call(
-		uintptr(unsafe.Pointer(&hwi)), waveMapper,
-		uintptr(unsafe.Pointer(&wfx)), ev, 0, callbackEvent,
-	)
-	if ret != 0 {
-		log("waveInOpen failed: MMRESULT %d", ret)
-		frameCh <- nil
-		return
-	}
-
-	bufSize := chunkSize * 2 // 16-bit mono = 2 bytes per sample
-	var bufs [numBufs][]byte
-	var hdrs [numBufs]wavehdr
-	for i := range bufs {
-		bufs[i] = make([]byte, bufSize)
-		hdrs[i] = wavehdr{Data: uintptr(unsafe.Pointer(&bufs[i][0])), Len: uint32(bufSize)}
-		pWaveInPrepareHeader.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
-		pWaveInAddBuffer.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
-	}
-
-	pWaveInStart.Call(hwi)
-
+func captureLoop(hwi, event uintptr, hdrs *[numBufs]wavehdr, bufs *[numBufs][]byte, stop chan struct{}, frameCh chan<- []int16) {
 	var frames []int16
 
-	// Capture loop - runs until stop channel is closed
 	for {
 		select {
 		case <-stop:
@@ -575,7 +587,7 @@ func recordLoop(stop chan struct{}, frameCh chan<- []int16) {
 		default:
 		}
 
-		pWaitForSingleObject.Call(ev, 100)
+		pWaitForSingleObject.Call(event, 100)
 
 		select {
 		case <-stop:
@@ -605,7 +617,7 @@ done:
 	pWaveInStop.Call(hwi)
 	pWaveInReset.Call(hwi)
 
-	// Drain any remaining buffers
+	// Drain remaining buffers
 	for i := range hdrs {
 		if hdrs[i].Flags&whdrDone != 0 && hdrs[i].Recorded > 0 {
 			n := hdrs[i].Recorded
