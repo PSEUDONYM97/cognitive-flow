@@ -143,7 +143,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.0.0"
+	version = "2.0.1"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -154,6 +154,9 @@ const (
 	wmApp        = 0x8000
 	wmTrayIcon   = wmApp + 1
 	wmRButtonUp  = 0x0205
+	wmLButtonUp  = 0x0202
+	wmNcHitTest  = 0x0084
+	htCaption    = 2
 
 	vkTilde    = 0xC0
 	vkEscape   = 0x1B
@@ -303,6 +306,7 @@ const (
 )
 
 var phase atomic.Int32
+var audioLevel atomic.Int32 // RMS level 0-100, updated by capture loop
 
 func currentPhase() int32  { return phase.Load() }
 func setPhaseVal(p int32)  { phase.Store(p) }
@@ -320,6 +324,7 @@ var state struct {
 
 	hook     uintptr
 	bar      uintptr // screen-edge recording bar
+	dot      uintptr // clickable indicator dot
 	trayHwnd uintptr
 	trayNID  notifyicon
 	trayIcon uintptr
@@ -337,6 +342,7 @@ func main() {
 		}
 	}
 
+	initLog()
 	loadConfig()
 
 	state.enabled = true
@@ -347,9 +353,10 @@ func main() {
 	log("Cognitive Flow v%s", version)
 	log("Server: %s", cfg.Server)
 
-	// Clean shutdown on console close
+	// Clean shutdown on console close (Ctrl+C, window close, etc.)
 	pSetConsoleCtrlHandler.Call(syscall.NewCallback(func(sig uintptr) uintptr {
 		shutdown()
+		pPostQuitMessage.Call(0) // break the message loop
 		return 1
 	}), 1)
 
@@ -365,6 +372,7 @@ func main() {
 
 	// Create UI
 	createBar()
+	createDot()
 	createTray()
 
 	// Keyboard hook
@@ -550,6 +558,12 @@ func startRecording() {
 
 	// Goroutine to receive frames when recording stops
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log("PANIC in transcription pipeline: %v", r)
+				setPhase(phaseIdle)
+			}
+		}()
 		frames := <-audio.frameCh
 
 		state.mu.Lock()
@@ -564,6 +578,10 @@ func startRecording() {
 
 		dur := float64(len(frames)) / sampleRate
 		log("Captured %.1fs", dur)
+
+		// Save audio BEFORE transcription (crash resilient)
+		saveAudio(frames)
+
 		setPhase(phaseProcessing)
 		transcribe(frames, clipboard)
 	}()
@@ -587,6 +605,19 @@ func stopRecording() {
 // Only reads filled buffers. Device is already open and recording.
 
 func captureLoop(hwi, event uintptr, hdrs *[numBufs]wavehdr, bufs *[numBufs][]byte, stop chan struct{}, frameCh chan<- []int16) {
+	defer func() {
+		if r := recover(); r != nil {
+			log("PANIC in captureLoop: %v", r)
+			// Still try to clean up and send what we have
+			pWaveInStop.Call(hwi)
+			pWaveInReset.Call(hwi)
+			for i := range hdrs {
+				pWaveInUnprepareHeader.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
+			}
+			pWaveInClose.Call(hwi)
+			frameCh <- nil
+		}
+	}()
 	var frames []int16
 
 	for {
@@ -610,12 +641,22 @@ func captureLoop(hwi, event uintptr, hdrs *[numBufs]wavehdr, bufs *[numBufs][]by
 				if n > 0 {
 					samples := make([]int16, n/2)
 					src := unsafe.Slice((*byte)(unsafe.Pointer(hdrs[i].Data)), n)
+					var sumSq float64
 					for j := range samples {
 						samples[j] = int16(src[j*2]) | int16(src[j*2+1])<<8
+						sumSq += float64(samples[j]) * float64(samples[j])
 					}
 					frames = append(frames, samples...)
+
+					// RMS as 0-100 (32768 max for int16)
+					rms := math.Sqrt(sumSq / float64(len(samples)))
+					level := int32(rms / 327.68) // 0-100
+					if level > 100 {
+						level = 100
+					}
+					audioLevel.Store(level)
 				}
-				hdrs[i].Flags = 0
+				hdrs[i].Flags &^= whdrDone // clear done bit, keep prepared
 				hdrs[i].Recorded = 0
 				pWaveInAddBuffer.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
 			}
@@ -743,6 +784,18 @@ func transcribe(samples []int16, clipboard bool) {
 	}
 
 	setPhase(phaseIdle)
+}
+
+func saveAudio(samples []int16) {
+	dir := filepath.Join(configDir(), "audio")
+	os.MkdirAll(dir, 0755)
+	name := time.Now().Format("2006-01-02_15-04-05") + ".wav"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, encodeWAV(samples), 0644); err != nil {
+		log("Audio save failed: %v", err)
+		return
+	}
+	log("Saved %s", path)
 }
 
 func encodeWAV(samples []int16) []byte {
@@ -885,47 +938,81 @@ func copyToClipboard(text string) {
 // Full-width bar at top of screen. Red while recording, amber while processing.
 // Click-through (WS_EX_TRANSPARENT), always on top, invisible when idle.
 
-const barHeight = 4
+const (
+	barMinHeight = 4
+	barMaxHeight = 32
+	timerRepaint = 2
+)
 
 var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 	switch uint32(umsg) {
 	case wmPaint:
 		var ps paintstruct
 		hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		sw, _, _ := pGetSystemMetrics.Call(0) // SM_CXSCREEN
 
+		p := currentPhase()
 		var color uintptr
-		switch currentPhase() {
+		var h int32
+
+		switch p {
 		case phaseRecording:
-			color = 0x003643F4 // Red (BGR)
+			level := audioLevel.Load()
+			// Bar height scales with audio level
+			h = barMinHeight + int32(level)*(barMaxHeight-barMinHeight)/100
+			// Color: green (quiet) -> amber (good) -> red (loud)
+			switch {
+			case level < 20:
+				color = 0x0050AF4C // Green (BGR)
+			case level < 60:
+				color = 0x0000BFFF // Amber (BGR)
+			default:
+				color = 0x003643F4 // Red (BGR)
+			}
 		case phaseProcessing:
-			color = 0x0000BFFF // Amber (BGR)
+			h = barMinHeight
+			color = 0x0000BFFF // Amber
 		default:
-			color = 0
+			h = 0
 		}
 
-		brush, _, _ := pCreateSolidBrush.Call(color)
-		sw, _, _ := pGetSystemMetrics.Call(0) // SM_CXSCREEN
-		r := [4]int32{0, 0, int32(sw), barHeight}
-		pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
-		pDeleteObject.Call(brush)
+		if h > 0 {
+			brush, _, _ := pCreateSolidBrush.Call(color)
+			r := [4]int32{0, 0, int32(sw), h}
+			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
+			pDeleteObject.Call(brush)
+		}
 
 		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 
 	case wmTimer:
-		// Heartbeat: detect sleep/wake (30s+ gap = system was sleeping)
-		now := time.Now()
-		if now.Sub(state.lastWake) > 60*time.Second {
-			log("Wake detected, pinging server")
-			go healthCheck()
+		if wp == timerRepaint {
+			// Repaint bar with current audio level
+			pInvalidateRect.Call(hwnd, 0, 1)
+			// Resize bar to match current level
+			sw, _, _ := pGetSystemMetrics.Call(0)
+			level := audioLevel.Load()
+			h := barMinHeight + int32(level)*(barMaxHeight-barMinHeight)/100
+			pMoveWindow.Call(hwnd, 0, 0, sw, uintptr(h), 1)
+			return 0
 		}
-		state.lastWake = now
+		if wp == timerHeartbeat {
+			now := time.Now()
+			if now.Sub(state.lastWake) > 60*time.Second {
+				log("Wake detected, pinging server")
+				go healthCheck()
+			}
+			state.lastWake = now
+		}
 		return 0
 	}
 
 	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
 	return r
 })
+
+var pKillTimer = user32.NewProc("KillTimer")
 
 func createBar() {
 	cls := utf16p("CogFlowBar")
@@ -940,12 +1027,11 @@ func createBar() {
 	hwnd, _, _ := pCreateWindowEx.Call(
 		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
 		uintptr(unsafe.Pointer(cls)), 0,
-		wsPopup, 0, 0, sw, barHeight, 0, 0, 0, 0,
+		wsPopup, 0, 0, sw, uintptr(barMaxHeight), 0, 0, 0, 0,
 	)
 	state.bar = hwnd
 
-	// Black = transparent (won't see anything until we show it with a color)
-	pSetLayeredWindowAttr.Call(hwnd, 0, 220, lwaAlpha) // Slightly transparent
+	pSetLayeredWindowAttr.Call(hwnd, 0, 220, lwaAlpha)
 
 	// Start hidden
 	pShowWindow.Call(hwnd, 0) // SW_HIDE
@@ -954,16 +1040,148 @@ func createBar() {
 	pSetTimer.Call(hwnd, timerHeartbeat, 30000, 0)
 }
 
+// ----- Clickable indicator dot -----
+// Always visible in bottom-right corner. Click to record (clipboard mode) or stop.
+// Draggable. Shows state: green=idle, gray=disabled, red=recording, amber=processing.
+
+const dotSize = 48
+
+var dotProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
+	switch uint32(umsg) {
+	case wmPaint:
+		var ps paintstruct
+		hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+
+		// Background: transparent (black will be color-keyed out)
+		bgBrush, _, _ := pCreateSolidBrush.Call(0)
+		r := [4]int32{0, 0, dotSize, dotSize}
+		pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), bgBrush)
+		pDeleteObject.Call(bgBrush)
+
+		// Dot color based on state
+		var color uintptr
+		p := currentPhase()
+		switch {
+		case !state.enabled:
+			color = 0x00808080 // Gray
+		case p == phaseRecording:
+			level := audioLevel.Load()
+			switch {
+			case level < 20:
+				color = 0x003643F4 // Red (quiet - still recording)
+			case level < 60:
+				color = 0x003643F4 // Red
+			default:
+				color = 0x001428F4 // Bright red (loud)
+			}
+		case p == phaseProcessing:
+			color = 0x0000BFFF // Amber
+		default:
+			color = 0x0050AF4C // Green
+		}
+
+		// Draw filled circle
+		pSelectObject := gdi32.NewProc("SelectObject")
+		pEllipse := gdi32.NewProc("Ellipse")
+		brush, _, _ := pCreateSolidBrush.Call(color)
+		pSelectObject.Call(hdc, brush)
+		// Null pen for no border
+		pCreatePen := gdi32.NewProc("CreatePen")
+		pen, _, _ := pCreatePen.Call(5, 0, 0) // PS_NULL
+		pSelectObject.Call(hdc, pen)
+		margin := int32(4)
+		pEllipse.Call(hdc, uintptr(margin), uintptr(margin), uintptr(dotSize-margin), uintptr(dotSize-margin))
+		pDeleteObject.Call(brush)
+		pDeleteObject.Call(pen)
+
+		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		return 0
+
+	case wmNcHitTest:
+		// Allow dragging by treating the whole window as caption
+		return htCaption
+
+	case wmLButtonUp:
+		// Click: start clipboard recording or stop current recording
+		go func() {
+			if currentPhase() == phaseRecording {
+				toggle(true) // stop + clipboard mode
+			} else if state.enabled {
+				toggle(true) // start clipboard recording
+			}
+		}()
+		return 0
+
+	case wmTimer:
+		if wp == timerRepaint {
+			pInvalidateRect.Call(hwnd, 0, 1)
+		}
+		return 0
+	}
+
+	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
+	return r
+})
+
+func createDot() {
+	cls := utf16p("CogFlowDot")
+	cursor, _, _ := pLoadCursor.Call(0, 32649) // IDC_HAND
+	wc := wndclass{
+		Size: uint32(unsafe.Sizeof(wndclass{})), WndProc: dotProc,
+		ClassName: cls, Cursor: cursor,
+	}
+	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
+
+	sw, _, _ := pGetSystemMetrics.Call(0) // SM_CXSCREEN
+	sh, _, _ := pGetSystemMetrics.Call(1) // SM_CYSCREEN
+
+	// Bottom-right corner with some margin
+	x := int(sw) - dotSize - 20
+	y := int(sh) - dotSize - 60
+
+	hwnd, _, _ := pCreateWindowEx.Call(
+		wsExLayered|wsExTopmost|wsExToolWindow,
+		uintptr(unsafe.Pointer(cls)), 0,
+		wsPopup,
+		uintptr(x), uintptr(y), dotSize, dotSize,
+		0, 0, 0, 0,
+	)
+	state.dot = hwnd
+
+	// Black = transparent (color key), so only the circle is visible
+	pSetLayeredWindowAttr.Call(hwnd, 0, 0, lwaColorKey)
+
+	pShowWindow.Call(hwnd, 8) // SW_SHOWNA
+}
+
 func setPhase(p int32) {
 	setPhaseVal(p)
 
 	switch p {
-	case phaseRecording, phaseProcessing:
+	case phaseRecording:
+		audioLevel.Store(0)
 		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
+		// Fast repaint timer for audio level visualization (50ms = 20fps)
+		pSetTimer.Call(state.bar, timerRepaint, 50, 0)
+		pSetTimer.Call(state.dot, timerRepaint, 50, 0)
+	case phaseProcessing:
+		pKillTimer.Call(state.bar, timerRepaint)
+		pKillTimer.Call(state.dot, timerRepaint)
+		audioLevel.Store(0)
+		sw, _, _ := pGetSystemMetrics.Call(0)
+		pMoveWindow.Call(state.bar, 0, 0, sw, barMinHeight, 1)
+		pShowWindow.Call(state.bar, 8)
+		pInvalidateRect.Call(state.bar, 0, 1)
+		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
+		pInvalidateRect.Call(state.dot, 0, 1)
 	default:
+		pKillTimer.Call(state.bar, timerRepaint)
+		pKillTimer.Call(state.dot, timerRepaint)
+		audioLevel.Store(0)
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
+		pInvalidateRect.Call(state.dot, 0, 1)
 	}
 
 	updateTrayIcon()
@@ -1124,8 +1342,23 @@ func utf16p(s string) *uint16 {
 	return p
 }
 
+var logFile *os.File
+
+func initLog() {
+	dir := configDir()
+	os.MkdirAll(dir, 0755)
+	f, err := os.OpenFile(filepath.Join(dir, "cogflow.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		logFile = f
+	}
+}
+
 func log(f string, a ...interface{}) {
-	fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(f, a...))
+	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(f, a...))
+	fmt.Print(line)
+	if logFile != nil {
+		logFile.WriteString(time.Now().Format("2006-01-02 ") + line)
+	}
 }
 
 func fatal(f string, a ...interface{}) {
