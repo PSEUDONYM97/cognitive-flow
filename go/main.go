@@ -1,3 +1,11 @@
+// Cognitive Flow v2 - Voice to text. Press tilde, speak, press tilde. Text appears.
+//
+// Design principles:
+//   - Invisible when idle, unmissable when active
+//   - Fast path: tilde -> speak -> tilde -> text typed. Nothing else.
+//   - Errors are visible (tray notifications), never silent
+//   - One config file, no settings UI
+//   - Channel-based concurrency, no shared mutable audio state
 package main
 
 import (
@@ -9,29 +17,56 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// --- Config ---
+// ----- Configuration -----
 
-const (
-	serverURL  = "http://192.168.0.10:9200"
-	sampleRate = 16000
-	channels   = 1
-	bitDepth   = 16
-	chunkSize  = 1024
-	numBuffers = 4
-	version    = "2.0.0"
-)
+type config struct {
+	Server       string            `json:"server"`
+	Replacements map[string]string `json:"replacements"`
+}
 
-// --- Win32 ---
+var cfg = config{
+	Server:       "http://192.168.0.10:9200",
+	Replacements: map[string]string{},
+}
+
+func loadConfig() {
+	dir := configDir()
+	os.MkdirAll(dir, 0755)
+
+	path := filepath.Join(dir, "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// Write default config so user can edit it
+		def, _ := json.MarshalIndent(cfg, "", "  ")
+		os.WriteFile(path, def, 0644)
+		return
+	}
+	json.Unmarshal(data, &cfg)
+	if cfg.Replacements == nil {
+		cfg.Replacements = map[string]string{}
+	}
+}
+
+func configDir() string {
+	if d := os.Getenv("APPDATA"); d != "" {
+		return filepath.Join(d, "CognitiveFlow")
+	}
+	return filepath.Join(os.Getenv("HOME"), ".cognitive_flow")
+}
+
+// ----- Win32 -----
 
 var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
@@ -40,186 +75,184 @@ var (
 	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 	shell32  = windows.NewLazySystemDLL("shell32.dll")
 
-	setWindowsHookEx     = user32.NewProc("SetWindowsHookExW")
-	unhookWindowsHookEx  = user32.NewProc("UnhookWindowsHookEx")
-	callNextHookEx       = user32.NewProc("CallNextHookEx")
-	peekMessage          = user32.NewProc("PeekMessageW")
-	translateMessage     = user32.NewProc("TranslateMessage")
-	dispatchMessage      = user32.NewProc("DispatchMessageW")
-	postMessage          = user32.NewProc("PostMessageW")
-	postQuitMessage      = user32.NewProc("PostQuitMessage")
-	getForegroundWindow  = user32.NewProc("GetForegroundWindow")
-	getFocus             = user32.NewProc("GetFocus")
-	getWindowThreadPID   = user32.NewProc("GetWindowThreadProcessId")
-	attachThreadInput    = user32.NewProc("AttachThreadInput")
-	getAsyncKeyState     = user32.NewProc("GetAsyncKeyState")
-	registerClassEx      = user32.NewProc("RegisterClassExW")
-	createWindowEx       = user32.NewProc("CreateWindowExW")
-	destroyWindow        = user32.NewProc("DestroyWindow")
-	showWindow           = user32.NewProc("ShowWindow")
-	setWindowPos         = user32.NewProc("SetWindowPos")
-	moveWindow           = user32.NewProc("MoveWindow")
-	getWindowRect        = user32.NewProc("GetWindowRect")
-	setLayeredWindowAttr = user32.NewProc("SetLayeredWindowAttributes")
-	defWindowProc        = user32.NewProc("DefWindowProcW")
-	loadCursor           = user32.NewProc("LoadCursorW")
-	getSystemMetrics     = user32.NewProc("GetSystemMetrics")
-	getCursorPos         = user32.NewProc("GetCursorPos")
-	setTimer             = user32.NewProc("SetTimer")
-	invalidateRect       = user32.NewProc("InvalidateRect")
-	beginPaint           = user32.NewProc("BeginPaint")
-	endPaint             = user32.NewProc("EndPaint")
-	fillRect             = user32.NewProc("FillRect")
-	openClipboard        = user32.NewProc("OpenClipboard")
-	closeClipboard       = user32.NewProc("CloseClipboard")
-	emptyClipboard       = user32.NewProc("EmptyClipboard")
-	setClipboardData     = user32.NewProc("SetClipboardData")
-	getDC                = user32.NewProc("GetDC")
-	releaseDC            = user32.NewProc("ReleaseDC")
-	setForegroundWindow  = user32.NewProc("SetForegroundWindow")
-	createPopupMenu      = user32.NewProc("CreatePopupMenu")
-	appendMenu           = user32.NewProc("AppendMenuW")
-	trackPopupMenu       = user32.NewProc("TrackPopupMenu")
-	destroyMenu          = user32.NewProc("DestroyMenu")
+	pSetWindowsHookEx    = user32.NewProc("SetWindowsHookExW")
+	pUnhookWindowsHookEx = user32.NewProc("UnhookWindowsHookEx")
+	pCallNextHookEx      = user32.NewProc("CallNextHookEx")
+	pGetMessage          = user32.NewProc("GetMessageW")
+	pTranslateMessage    = user32.NewProc("TranslateMessage")
+	pDispatchMessage     = user32.NewProc("DispatchMessageW")
+	pPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	pGetAsyncKeyState    = user32.NewProc("GetAsyncKeyState")
+	pRegisterClassEx     = user32.NewProc("RegisterClassExW")
+	pCreateWindowEx      = user32.NewProc("CreateWindowExW")
+	pDestroyWindow       = user32.NewProc("DestroyWindow")
+	pShowWindow          = user32.NewProc("ShowWindow")
+	pSetWindowPos        = user32.NewProc("SetWindowPos")
+	pMoveWindow          = user32.NewProc("MoveWindow")
+	pDefWindowProc       = user32.NewProc("DefWindowProcW")
+	pLoadCursor          = user32.NewProc("LoadCursorW")
+	pGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
+	pGetCursorPos        = user32.NewProc("GetCursorPos")
+	pSetLayeredWindowAttr = user32.NewProc("SetLayeredWindowAttributes")
+	pInvalidateRect      = user32.NewProc("InvalidateRect")
+	pBeginPaint          = user32.NewProc("BeginPaint")
+	pEndPaint            = user32.NewProc("EndPaint")
+	pFillRect            = user32.NewProc("FillRect")
+	pSetTimer            = user32.NewProc("SetTimer")
+	pSendInput           = user32.NewProc("SendInput")
+	pOpenClipboard       = user32.NewProc("OpenClipboard")
+	pCloseClipboard      = user32.NewProc("CloseClipboard")
+	pEmptyClipboard      = user32.NewProc("EmptyClipboard")
+	pSetClipboardData    = user32.NewProc("SetClipboardData")
+	pGetDC               = user32.NewProc("GetDC")
+	pReleaseDC           = user32.NewProc("ReleaseDC")
+	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	pCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
+	pAppendMenu          = user32.NewProc("AppendMenuW")
+	pTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
+	pDestroyMenu         = user32.NewProc("DestroyMenu")
+	pCreateIconIndirect  = user32.NewProc("CreateIconIndirect")
+	pDestroyIcon         = user32.NewProc("DestroyIcon")
 
-	getCurrentThreadId   = kernel32.NewProc("GetCurrentThreadId")
-	globalAlloc          = kernel32.NewProc("GlobalAlloc")
-	globalLock           = kernel32.NewProc("GlobalLock")
-	globalUnlock         = kernel32.NewProc("GlobalUnlock")
-	createEvent          = kernel32.NewProc("CreateEventW")
-	setEvent             = kernel32.NewProc("SetEvent")
-	waitForSingleObject  = kernel32.NewProc("WaitForSingleObject")
+	pGetCurrentThreadId    = kernel32.NewProc("GetCurrentThreadId")
+	pGlobalAlloc           = kernel32.NewProc("GlobalAlloc")
+	pGlobalLock            = kernel32.NewProc("GlobalLock")
+	pGlobalUnlock          = kernel32.NewProc("GlobalUnlock")
+	pCreateEvent           = kernel32.NewProc("CreateEventW")
+	pSetEvent              = kernel32.NewProc("SetEvent")
+	pWaitForSingleObject   = kernel32.NewProc("WaitForSingleObject")
+	pSetConsoleCtrlHandler = kernel32.NewProc("SetConsoleCtrlHandler")
 
-	waveInOpen            = winmm.NewProc("waveInOpen")
-	waveInClose           = winmm.NewProc("waveInClose")
-	waveInPrepareHeader   = winmm.NewProc("waveInPrepareHeader")
-	waveInUnprepareHeader = winmm.NewProc("waveInUnprepareHeader")
-	waveInAddBuffer       = winmm.NewProc("waveInAddBuffer")
-	waveInStart           = winmm.NewProc("waveInStart")
-	waveInStop            = winmm.NewProc("waveInStop")
-	waveInReset           = winmm.NewProc("waveInReset")
+	pWaveInOpen            = winmm.NewProc("waveInOpen")
+	pWaveInClose           = winmm.NewProc("waveInClose")
+	pWaveInPrepareHeader   = winmm.NewProc("waveInPrepareHeader")
+	pWaveInUnprepareHeader = winmm.NewProc("waveInUnprepareHeader")
+	pWaveInAddBuffer       = winmm.NewProc("waveInAddBuffer")
+	pWaveInStart           = winmm.NewProc("waveInStart")
+	pWaveInStop            = winmm.NewProc("waveInStop")
+	pWaveInReset           = winmm.NewProc("waveInReset")
 
-	createSolidBrush       = gdi32.NewProc("CreateSolidBrush")
-	createPen              = gdi32.NewProc("CreatePen")
-	selectObject           = gdi32.NewProc("SelectObject")
-	deleteObject           = gdi32.NewProc("DeleteObject")
-	ellipse                = gdi32.NewProc("Ellipse")
-	createDIBSection       = gdi32.NewProc("CreateDIBSection")
+	pCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
+	pDeleteObject     = gdi32.NewProc("DeleteObject")
+	pCreateDIBSection = gdi32.NewProc("CreateDIBSection")
 
-	shellNotifyIcon    = shell32.NewProc("Shell_NotifyIconW")
-	createIconIndirect = user32.NewProc("CreateIconIndirect")
-	destroyIcon        = user32.NewProc("DestroyIcon")
+	pShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 )
 
+// ----- Constants -----
+
 const (
+	version = "2.0.0"
+
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
-	wmChar       = 0x0102
 	wmPaint      = 0x000F
 	wmDestroy    = 0x0002
 	wmTimer      = 0x0113
-	wmLButtonUp  = 0x0202
 	wmCommand    = 0x0111
 	wmApp        = 0x8000
 	wmTrayIcon   = wmApp + 1
 	wmRButtonUp  = 0x0205
-	ninSelect    = 0x0400
-	vkTilde      = 0xC0
-	vkEscape     = 0x1B
-	vkLControl   = 0xA2
-	vkRControl   = 0xA3
-	pmRemove     = 0x0001
-	cfUnicode    = 13
-	gmemMoveable = 0x0002
+
+	vkTilde    = 0xC0
+	vkEscape   = 0x1B
+	vkLCtrl    = 0xA2
+	vkRCtrl    = 0xA3
+	vkLShift   = 0xA0
+	vkRShift   = 0xA1
+	vkReturn   = 0x0D
+	vkControl  = 0x11
+	vkV        = 0x56
 
 	wsPopup        = 0x80000000
 	wsExLayered    = 0x00080000
 	wsExTopmost    = 0x00000008
 	wsExToolWindow = 0x00000080
 	wsExNoActivate = 0x08000000
-
-	swShowNA = 8
-	swHide   = 0
+	wsExTransparent = 0x00000020
 
 	lwaColorKey = 0x01
+	lwaAlpha    = 0x02
 
-	nimAdd    = 0x00000000
-	nimModify = 0x00000001
-	nimDelete = 0x00000002
-	nifMsg    = 0x00000001
-	nifIcon   = 0x00000002
-	nifTip    = 0x00000004
-	nifShowTip = 0x00000080
+	inputKeyboard     = 1
+	keyeventfUnicode  = 0x0004
+	keyeventfKeyup    = 0x0002
+	keyeventfExtended = 0x0001
 
-	mfString    = 0x00000000
-	mfSeparator = 0x00000800
-	mfChecked   = 0x00000008
+	nimAdd    = 0
+	nimModify = 1
+	nimDelete = 2
+	nifMsg    = 1
+	nifIcon   = 2
+	nifTip    = 4
+	nifInfo   = 16
+	nifShowTip = 0x80
+	niiInfo   = 0x01
 
-	callbackEvent  = 0x00050000
-	waveMapper     = 0xFFFFFFFF
-	wavePCM        = 1
-	whdrDone       = 0x00000001
+	mfString    = 0
+	mfSeparator = 0x800
+	mfChecked   = 0x08
+
+	cfUnicode    = 13
+	gmemMoveable = 0x0002
+
+	callbackEvent = 0x00050000
+	waveMapper    = 0xFFFFFFFF
+	wavePCM       = 1
+	whdrDone      = 1
+
+	sampleRate = 16000
+	chunkSize  = 1024
+	numBufs    = 4
+
+	timerHeartbeat = 1
 )
 
-// --- Structures ---
+// ----- Win32 types -----
 
-type msg struct {
+type wmsg struct {
 	Hwnd    uintptr
 	Message uint32
 	WParam  uintptr
 	LParam  uintptr
 	Time    uint32
-	Pt      point
+	Pt      [2]int32
 }
 
-type point struct{ X, Y int32 }
-type rect struct{ Left, Top, Right, Bottom int32 }
-
-type kbdllhook struct {
-	VkCode      uint32
-	ScanCode    uint32
-	Flags       uint32
-	Time        uint32
-	DwExtraInfo uintptr
+type kbhook struct {
+	VkCode, ScanCode, Flags, Time uint32
+	Extra                         uintptr
 }
 
-type wndclassex struct {
-	Size       uint32
-	Style      uint32
-	WndProc    uintptr
-	ClsExtra   int32
-	WndExtra   int32
-	Instance   uintptr
-	Icon       uintptr
-	Cursor     uintptr
-	Background uintptr
-	MenuName   *uint16
-	ClassName  *uint16
-	IconSm     uintptr
+type wndclass struct {
+	Size                         uint32
+	Style                        uint32
+	WndProc                      uintptr
+	ClsExtra, WndExtra           int32
+	Instance, Icon, Cursor, Bg   uintptr
+	MenuName, ClassName          *uint16
+	IconSm                       uintptr
 }
 
 type paintstruct struct {
-	Hdc        uintptr
-	Erase      int32
-	Paint      rect
-	Restore    int32
-	IncUpdate  int32
-	Reserved   [32]byte
+	Hdc     uintptr
+	Erase   int32
+	Paint   [4]int32
+	_       [44]byte
 }
 
-type waveformatex struct {
-	Tag        uint16
-	Channels   uint16
-	SampleRate uint32
-	ByteRate   uint32
-	BlockAlign uint16
-	BitDepth   uint16
-	Extra      uint16
+type waveformat struct {
+	Tag                  uint16
+	Ch                   uint16
+	Rate                 uint32
+	ByteRate             uint32
+	BlockAlign, BitDepth uint16
+	Extra                uint16
 }
 
 type wavehdr struct {
 	Data     uintptr
-	Length   uint32
+	Len      uint32
 	Recorded uint32
 	User     uintptr
 	Flags    uint32
@@ -228,330 +261,365 @@ type wavehdr struct {
 	Reserved uintptr
 }
 
-type notifyicondata struct {
-	Size         uint32
-	Hwnd         uintptr
-	ID           uint32
-	Flags        uint32
-	CallbackMsg  uint32
-	Icon         uintptr
-	Tip          [128]uint16
-	State        uint32
-	StateMask    uint32
-	Info         [256]uint16
-	Version      uint32
-	InfoTitle    [64]uint16
-	InfoFlags    uint32
-	GUID         [16]byte
-	BalloonIcon  uintptr
+type notifyicon struct {
+	Size        uint32
+	Hwnd        uintptr
+	ID          uint32
+	Flags       uint32
+	CallbackMsg uint32
+	Icon        uintptr
+	Tip         [128]uint16
+	State       uint32
+	StateMask   uint32
+	Info        [256]uint16
+	Version     uint32
+	InfoTitle   [64]uint16
+	InfoFlags   uint32
+	GUID        [16]byte
+	BalloonIcon uintptr
 }
 
-type bitmapinfoheader struct {
-	Size          uint32
-	Width         int32
-	Height        int32
-	Planes        uint16
-	BitCount      uint16
-	Compression   uint32
-	SizeImage     uint32
-	XPelsPerMeter int32
-	YPelsPerMeter int32
-	ClrUsed       uint32
-	ClrImportant  uint32
-}
-
-type bitmapinfo struct {
-	Header bitmapinfoheader
-	Colors [1]uint32
+type bmpinfo struct {
+	Size                       uint32
+	Width, Height              int32
+	Planes, Bits               uint16
+	Compress, ImgSize          uint32
+	XPel, YPel, ClrUsed, ClrImp uint32
 }
 
 type iconinfo struct {
-	IsIcon  int32
-	XHot    uint32
-	YHot    uint32
-	Mask    uintptr
-	Color   uintptr
+	IsIcon       int32
+	XHot, YHot   uint32
+	Mask, Color  uintptr
 }
 
-// --- App state ---
+// ----- App state -----
 
-var app struct {
+var state struct {
 	mu            sync.Mutex
-	hook          uintptr
 	recording     bool
 	clipboardMode bool
-	hotkeyEnabled bool
+	enabled       bool
 	running       bool
 	lastEsc       time.Time
-	lastLoop      time.Time
+	lastWake      time.Time
 
-	// Audio
-	hwi     uintptr
-	event   uintptr
-	buffers [numBuffers][]byte
-	headers [numBuffers]wavehdr
-	frames  []int16
+	hook     uintptr
+	bar      uintptr // screen-edge recording bar
+	trayHwnd uintptr
+	trayNID  notifyicon
+	trayIcon uintptr
+	phase    string // "idle", "recording", "processing"
 
-	// UI
-	indicator uintptr
-	trayHwnd  uintptr
-	trayIcon  uintptr
-	nid       notifyicondata
-	state     string // "idle", "recording", "processing"
+	stopCh chan struct{} // signal recordLoop to stop
 }
+
+// ----- Entry point -----
 
 func main() {
-	app.hotkeyEnabled = true
-	app.running = true
-	app.state = "idle"
+	loadConfig()
 
-	log("Cognitive Flow v%s (Go)", version)
-	log("Server: %s", serverURL)
+	state.enabled = true
+	state.running = true
+	state.phase = "idle"
+	state.lastWake = time.Now()
 
-	// Warm up server
-	go warmup()
+	log("Cognitive Flow v%s", version)
+	log("Server: %s", cfg.Server)
+
+	// Clean shutdown on console close
+	pSetConsoleCtrlHandler.Call(syscall.NewCallback(func(sig uintptr) uintptr {
+		shutdown()
+		return 1
+	}), 1)
+
+	// Check server
+	go func() {
+		if err := healthCheck(); err != nil {
+			log("Server offline: %v", err)
+			notify("Server offline", fmt.Sprintf("Cannot reach %s", cfg.Server))
+		} else {
+			log("Server ready")
+		}
+	}()
 
 	// Create UI
-	createIndicator()
+	createBar()
 	createTray()
 
-	// Install keyboard hook
-	proc := syscall.NewCallback(hookProc)
-	h, _, err := setWindowsHookEx.Call(whKeyboardLL, proc, 0, 0)
+	// Keyboard hook
+	h, _, err := pSetWindowsHookEx.Call(whKeyboardLL, syscall.NewCallback(hookProc), 0, 0)
 	if h == 0 {
-		fatal("keyboard hook failed: %v", err)
+		fatal("Keyboard hook failed: %v", err)
 	}
-	app.hook = h
-	defer unhookWindowsHookEx.Call(app.hook)
+	state.hook = h
 
-	log("Ready. Press ~ to record.")
+	log("Ready. Press ~ to record, Shift+~ for clipboard, Ctrl+~ to toggle.")
 
-	// Message loop
-	app.lastLoop = time.Now()
-	var m msg
-	for app.running {
-		for peekMsg(&m) {
-			translateMessage.Call(uintptr(unsafe.Pointer(&m)))
-			dispatchMessage.Call(uintptr(unsafe.Pointer(&m)))
+	// Message loop (GetMessage blocks until a message arrives - efficient, no polling)
+	var m wmsg
+	for {
+		r, _, _ := pGetMessage.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if r == 0 || int32(r) == -1 {
+			break
 		}
+		pTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		pDispatchMessage.Call(uintptr(unsafe.Pointer(&m)))
+	}
 
-		// Sleep/wake detection
-		now := time.Now()
-		if now.Sub(app.lastLoop) > 30*time.Second {
-			log("Wake detected, warming up server")
-			go warmup()
-		}
-		app.lastLoop = now
+	shutdown()
+}
 
-		time.Sleep(1 * time.Millisecond)
+func shutdown() {
+	if !state.running {
+		return
+	}
+	state.running = false
+	log("Shutting down")
+	if state.hook != 0 {
+		pUnhookWindowsHookEx.Call(state.hook)
+	}
+	pShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&state.trayNID)))
+	if state.trayIcon != 0 {
+		pDestroyIcon.Call(state.trayIcon)
 	}
 }
 
-// --- Keyboard hook ---
+// ----- Keyboard hook -----
 
 func hookProc(nCode int, wParam, lParam uintptr) uintptr {
-	if nCode >= 0 {
-		kb := (*kbdllhook)(unsafe.Pointer(lParam))
-		down := wParam == wmKeydown
+	if nCode >= 0 && wParam == wmKeydown {
+		kb := (*kbhook)(unsafe.Pointer(lParam))
 
-		if kb.VkCode == vkTilde && down {
-			// Ctrl+~ = toggle hotkey
-			if ctrlDown() {
-				app.hotkeyEnabled = !app.hotkeyEnabled
-				if app.hotkeyEnabled {
+		switch kb.VkCode {
+		case vkTilde:
+			ctrl := keyDown(vkLCtrl) || keyDown(vkRCtrl)
+			shift := keyDown(vkLShift) || keyDown(vkRShift)
+
+			if ctrl {
+				state.enabled = !state.enabled
+				if state.enabled {
 					log("Hotkey enabled")
-					setState("idle")
+					notify("Hotkey enabled", "Press ~ to record")
 				} else {
-					log("Hotkey disabled")
-					setState("idle")
+					log("Hotkey disabled - tilde passes through")
+					notify("Hotkey disabled", "Press Ctrl+~ to re-enable")
 				}
 				return 1
 			}
 
-			if app.hotkeyEnabled {
-				go toggle(false)
-				return 1
+			if !state.enabled {
+				return passthrough(nCode, wParam, lParam)
 			}
-		}
 
-		if kb.VkCode == vkEscape && down && app.recording {
-			now := time.Now()
-			if now.Sub(app.lastEsc) < 500*time.Millisecond {
-				go cancel()
-				return 1
+			go toggle(shift)
+			return 1
+
+		case vkEscape:
+			if state.recording {
+				now := time.Now()
+				if now.Sub(state.lastEsc) < 500*time.Millisecond {
+					go cancel()
+					return 1
+				}
+				state.lastEsc = now
 			}
-			app.lastEsc = now
 		}
 	}
 
-	r, _, _ := callNextHookEx.Call(0, uintptr(nCode), wParam, lParam)
+	return passthrough(nCode, wParam, lParam)
+}
+
+func passthrough(nCode int, wParam, lParam uintptr) uintptr {
+	r, _, _ := pCallNextHookEx.Call(0, uintptr(nCode), wParam, lParam)
 	return r
 }
 
-func ctrlDown() bool {
-	l, _, _ := getAsyncKeyState.Call(vkLControl)
-	r, _, _ := getAsyncKeyState.Call(vkRControl)
-	return int16(l)&(-32768) != 0 || int16(r)&(-32768) != 0
+func keyDown(vk uintptr) bool {
+	r, _, _ := pGetAsyncKeyState.Call(vk)
+	return int16(r)&(-32768) != 0
 }
 
-// --- Recording ---
+// ----- Recording flow -----
 
 func toggle(clipboard bool) {
-	app.mu.Lock()
-	defer app.mu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
 
-	if app.recording {
+	if state.recording {
 		if clipboard {
-			app.clipboardMode = true
+			state.clipboardMode = true
 		}
 		stopRecording()
 	} else {
-		app.clipboardMode = clipboard
+		state.clipboardMode = clipboard
 		startRecording()
 	}
 }
 
 func cancel() {
-	app.mu.Lock()
-	defer app.mu.Unlock()
-
-	if !app.recording {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.recording {
 		return
 	}
 	log("Cancelled")
-	app.recording = false
-	resetAudio()
-	setState("idle")
+	state.recording = false
+	if state.stopCh != nil {
+		close(state.stopCh)
+		state.stopCh = nil
+	}
+	setPhase("idle")
 }
 
 func startRecording() {
-	log("Recording... (clipboard: %v)", app.clipboardMode)
-	app.recording = true
-	app.frames = nil
-	setState("recording")
+	log("Recording (clipboard: %v)", state.clipboardMode)
+	state.recording = true
+	setPhase("recording")
 
-	// Warm server while we record
-	go warmup()
+	// Warm server while user speaks
+	go healthCheck()
 
-	// Open audio
-	wfx := waveformatex{
-		Tag: wavePCM, Channels: channels, SampleRate: sampleRate,
-		BitDepth: bitDepth, BlockAlign: channels * bitDepth / 8,
-		ByteRate: sampleRate * uint32(channels) * uint32(bitDepth) / 8,
-	}
+	// Start audio capture - recordLoop owns its data, returns frames via channel
+	frameCh := make(chan []int16, 1)
+	state.stopCh = make(chan struct{})
+	go recordLoop(state.stopCh, frameCh)
 
-	ev, _, _ := createEvent.Call(0, 0, 0, 0)
-	app.event = ev
+	// Wait for stop in a separate goroutine so we don't block the mutex
+	go func() {
+		frames := <-frameCh
 
-	ret, _, _ := waveInOpen.Call(
-		uintptr(unsafe.Pointer(&app.hwi)), waveMapper,
-		uintptr(unsafe.Pointer(&wfx)), ev, 0, callbackEvent,
-	)
-	if ret != 0 {
-		log("waveInOpen failed: %d", ret)
-		app.recording = false
-		setState("idle")
-		return
-	}
+		state.mu.Lock()
+		clipboard := state.clipboardMode
+		state.mu.Unlock()
 
-	bufSize := chunkSize * channels * bitDepth / 8
-	for i := 0; i < numBuffers; i++ {
-		app.buffers[i] = make([]byte, bufSize)
-		app.headers[i] = wavehdr{
-			Data:   uintptr(unsafe.Pointer(&app.buffers[i][0])),
-			Length: uint32(bufSize),
-		}
-		waveInPrepareHeader.Call(app.hwi, uintptr(unsafe.Pointer(&app.headers[i])), unsafe.Sizeof(app.headers[i]))
-		waveInAddBuffer.Call(app.hwi, uintptr(unsafe.Pointer(&app.headers[i])), unsafe.Sizeof(app.headers[i]))
-	}
-
-	waveInStart.Call(app.hwi)
-	go recordLoop()
-}
-
-func recordLoop() {
-	for {
-		if !app.recording {
-			return
-		}
-		waitForSingleObject.Call(app.event, 100)
-		if !app.recording {
+		if len(frames) == 0 {
+			log("No audio captured")
+			setPhase("idle")
 			return
 		}
 
-		for i := 0; i < numBuffers; i++ {
-			if app.headers[i].Flags&whdrDone != 0 {
-				n := app.headers[i].Recorded
-				if n > 0 {
-					buf := make([]byte, n)
-					copy(buf, app.buffers[i][:n])
-					samples := make([]int16, n/2)
-					for j := range samples {
-						samples[j] = int16(buf[j*2]) | int16(buf[j*2+1])<<8
-					}
-					app.frames = append(app.frames, samples...)
-				}
-				app.headers[i].Flags = 0
-				app.headers[i].Recorded = 0
-				waveInAddBuffer.Call(app.hwi, uintptr(unsafe.Pointer(&app.headers[i])), unsafe.Sizeof(app.headers[i]))
-			}
-		}
-	}
+		dur := float64(len(frames)) / sampleRate
+		log("Captured %.1fs", dur)
+		setPhase("processing")
+		transcribe(frames, clipboard)
+	}()
 }
 
 func stopRecording() {
-	if !app.recording {
+	if !state.recording {
 		return
 	}
-	app.recording = false
-	setState("processing")
-
-	waveInStop.Call(app.hwi)
-	waveInReset.Call(app.hwi)
-	setEvent.Call(app.event)
-
-	frames := make([]int16, len(app.frames))
-	copy(frames, app.frames)
-	clipboard := app.clipboardMode
-
-	resetAudio()
-
-	if len(frames) == 0 {
-		log("No audio")
-		setState("idle")
-		return
+	log("Stopped")
+	state.recording = false
+	if state.stopCh != nil {
+		close(state.stopCh)
+		state.stopCh = nil
 	}
-
-	log("Captured %.1fs audio", float64(len(frames))/sampleRate)
-	go transcribe(frames, clipboard)
 }
 
-func resetAudio() {
-	if app.hwi != 0 {
-		for i := 0; i < numBuffers; i++ {
-			waveInUnprepareHeader.Call(app.hwi, uintptr(unsafe.Pointer(&app.headers[i])), unsafe.Sizeof(app.headers[i]))
+// ----- Audio capture -----
+// recordLoop owns all audio data. No shared mutable state.
+// It sends captured frames back through frameCh when done.
+
+func recordLoop(stop chan struct{}, frameCh chan<- []int16) {
+	wfx := waveformat{
+		Tag: wavePCM, Ch: 1, Rate: sampleRate,
+		BitDepth: 16, BlockAlign: 2, ByteRate: sampleRate * 2,
+	}
+
+	ev, _, _ := pCreateEvent.Call(0, 0, 0, 0)
+	var hwi uintptr
+	ret, _, _ := pWaveInOpen.Call(
+		uintptr(unsafe.Pointer(&hwi)), waveMapper,
+		uintptr(unsafe.Pointer(&wfx)), ev, 0, callbackEvent,
+	)
+	if ret != 0 {
+		log("waveInOpen failed: MMRESULT %d", ret)
+		frameCh <- nil
+		return
+	}
+
+	bufSize := chunkSize * 2 // 16-bit mono = 2 bytes per sample
+	var bufs [numBufs][]byte
+	var hdrs [numBufs]wavehdr
+	for i := range bufs {
+		bufs[i] = make([]byte, bufSize)
+		hdrs[i] = wavehdr{Data: uintptr(unsafe.Pointer(&bufs[i][0])), Len: uint32(bufSize)}
+		pWaveInPrepareHeader.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
+		pWaveInAddBuffer.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
+	}
+
+	pWaveInStart.Call(hwi)
+
+	var frames []int16
+
+	// Capture loop - runs until stop channel is closed
+	for {
+		select {
+		case <-stop:
+			goto done
+		default:
 		}
-		waveInClose.Call(app.hwi)
-		app.hwi = 0
+
+		pWaitForSingleObject.Call(ev, 100)
+
+		select {
+		case <-stop:
+			goto done
+		default:
+		}
+
+		for i := range hdrs {
+			if hdrs[i].Flags&whdrDone != 0 {
+				n := hdrs[i].Recorded
+				if n > 0 {
+					samples := make([]int16, n/2)
+					src := unsafe.Slice((*byte)(unsafe.Pointer(hdrs[i].Data)), n)
+					for j := range samples {
+						samples[j] = int16(src[j*2]) | int16(src[j*2+1])<<8
+					}
+					frames = append(frames, samples...)
+				}
+				hdrs[i].Flags = 0
+				hdrs[i].Recorded = 0
+				pWaveInAddBuffer.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
+			}
+		}
 	}
+
+done:
+	pWaveInStop.Call(hwi)
+	pWaveInReset.Call(hwi)
+
+	// Drain any remaining buffers
+	for i := range hdrs {
+		if hdrs[i].Flags&whdrDone != 0 && hdrs[i].Recorded > 0 {
+			n := hdrs[i].Recorded
+			samples := make([]int16, n/2)
+			src := unsafe.Slice((*byte)(unsafe.Pointer(hdrs[i].Data)), n)
+			for j := range samples {
+				samples[j] = int16(src[j*2]) | int16(src[j*2+1])<<8
+			}
+			frames = append(frames, samples...)
+		}
+		pWaveInUnprepareHeader.Call(hwi, uintptr(unsafe.Pointer(&hdrs[i])), unsafe.Sizeof(hdrs[i]))
+	}
+
+	pWaveInClose.Call(hwi)
+	frameCh <- frames
 }
 
-// --- Transcription ---
+// ----- Server communication -----
 
-func warmup() {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(serverURL + "/health")
+func healthCheck() error {
+	c := &http.Client{Timeout: 5 * time.Second}
+	resp, err := c.Get(cfg.Server + "/health")
 	if err != nil {
-		log("Server unreachable: %v", err)
-		return
+		return err
 	}
-	defer resp.Body.Close()
-	var health struct {
-		Status string `json:"status"`
-		Model  string `json:"model"`
-	}
-	json.NewDecoder(resp.Body).Decode(&health)
-	log("Server: %s (%s)", health.Model, health.Status)
+	resp.Body.Close()
+	return nil
 }
 
 func transcribe(samples []int16, clipboard bool) {
@@ -560,382 +628,397 @@ func transcribe(samples []int16, clipboard bool) {
 	// Encode WAV
 	wav := encodeWAV(samples)
 
-	// Build multipart
-	boundary := "----CogFlow" + fmt.Sprintf("%d", time.Now().UnixNano())
+	// Multipart body
+	boundary := fmt.Sprintf("----cf%d", time.Now().UnixNano())
 	var body bytes.Buffer
-	body.WriteString("--" + boundary + "\r\n")
+	fmt.Fprintf(&body, "--%s\r\n", boundary)
 	body.WriteString("Content-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\n")
 	body.WriteString("Content-Type: audio/wav\r\n\r\n")
 	body.Write(wav)
-	body.WriteString("\r\n--" + boundary + "--\r\n")
+	fmt.Fprintf(&body, "\r\n--%s--\r\n", boundary)
+	payload := body.Bytes()
 
-	// POST with retry
+	// POST with retry (5s, 10s, 15s backoff)
 	var result struct {
 		Text string  `json:"text"`
 		Ms   float64 `json:"processing_time_ms"`
 	}
 
-	delays := []time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second}
+	delays := [3]time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second}
 	var lastErr error
 
 	for attempt := 0; attempt <= 3; attempt++ {
 		if attempt > 0 {
-			log("Retry %d/3 in %v...", attempt, delays[attempt-1])
+			log("Retry %d/3 in %v", attempt, delays[attempt-1])
 			time.Sleep(delays[attempt-1])
 		}
 
-		client := &http.Client{Timeout: 30 * time.Second}
-		req, _ := http.NewRequest("POST", serverURL+"/transcribe",
-			bytes.NewReader(body.Bytes()))
+		c := &http.Client{Timeout: 30 * time.Second}
+		req, _ := http.NewRequest("POST", cfg.Server+"/transcribe", bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 
-		resp, err := client.Do(req)
+		resp, err := c.Do(req)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
-		respBody, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
 		if resp.StatusCode != 200 {
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
 			continue
 		}
 
-		json.Unmarshal(respBody, &result)
+		json.Unmarshal(b, &result)
 		lastErr = nil
 		break
 	}
 
 	if lastErr != nil {
 		log("Transcription failed: %v", lastErr)
-		setState("idle")
+		notify("Transcription failed", lastErr.Error())
+		setPhase("idle")
 		return
 	}
 
 	text := strings.TrimSpace(result.Text)
 	if text == "" {
-		log("Empty result")
-		setState("idle")
+		log("Empty transcription")
+		setPhase("idle")
 		return
 	}
 
+	// Word replacements from config
+	text = applyReplacements(text)
+
 	elapsed := time.Since(start)
-	log("%.0fms (server: %.0fms) | %s", float64(elapsed.Milliseconds()), result.Ms, text)
+	log("%dms (server: %.0fms) | %s", elapsed.Milliseconds(), result.Ms, text)
 
 	// Output
 	if clipboard {
-		if err := copyToClipboard(text); err != nil {
-			log("Clipboard error: %v", err)
-		} else {
-			log("Copied to clipboard")
-		}
+		copyToClipboard(text)
+		log("Copied to clipboard")
 	} else {
 		if err := typeText(text + " "); err != nil {
-			log("Type error: %v, falling back to clipboard", err)
+			log("SendInput failed: %v - copying to clipboard", err)
 			copyToClipboard(text)
+			notify("Typed via clipboard", "SendInput failed, text copied instead")
 		}
 	}
 
-	setState("idle")
+	setPhase("idle")
 }
 
 func encodeWAV(samples []int16) []byte {
-	dataSize := len(samples) * 2
-	var buf bytes.Buffer
-	buf.Grow(44 + dataSize)
-
-	buf.WriteString("RIFF")
-	binary.Write(&buf, binary.LittleEndian, uint32(36+dataSize))
-	buf.WriteString("WAVE")
-	buf.WriteString("fmt ")
-	binary.Write(&buf, binary.LittleEndian, uint32(16))
-	binary.Write(&buf, binary.LittleEndian, uint16(1))          // PCM
-	binary.Write(&buf, binary.LittleEndian, uint16(1))          // mono
-	binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))
-	binary.Write(&buf, binary.LittleEndian, uint32(sampleRate*2))
-	binary.Write(&buf, binary.LittleEndian, uint16(2))          // block align
-	binary.Write(&buf, binary.LittleEndian, uint16(16))         // bits
-	buf.WriteString("data")
-	binary.Write(&buf, binary.LittleEndian, uint32(dataSize))
-
+	n := len(samples) * 2
+	var b bytes.Buffer
+	b.Grow(44 + n)
+	b.WriteString("RIFF")
+	binary.Write(&b, binary.LittleEndian, uint32(36+n))
+	b.WriteString("WAVEfmt ")
+	binary.Write(&b, binary.LittleEndian, uint32(16))           // chunk size
+	binary.Write(&b, binary.LittleEndian, uint16(1))            // PCM
+	binary.Write(&b, binary.LittleEndian, uint16(1))            // mono
+	binary.Write(&b, binary.LittleEndian, uint32(sampleRate))   // sample rate
+	binary.Write(&b, binary.LittleEndian, uint32(sampleRate*2)) // byte rate
+	binary.Write(&b, binary.LittleEndian, uint16(2))            // block align
+	binary.Write(&b, binary.LittleEndian, uint16(16))           // bits
+	b.WriteString("data")
+	binary.Write(&b, binary.LittleEndian, uint32(n))
 	for _, s := range samples {
-		binary.Write(&buf, binary.LittleEndian, s)
+		binary.Write(&b, binary.LittleEndian, s)
 	}
-	return buf.Bytes()
+	return b.Bytes()
 }
 
-// --- Text injection ---
+func applyReplacements(text string) string {
+	if len(cfg.Replacements) == 0 {
+		return text
+	}
+	words := strings.Fields(text)
+	for i, w := range words {
+		// Separate trailing punctuation: "hello," -> "hello" + ","
+		clean := strings.TrimRightFunc(w, unicode.IsPunct)
+		suffix := w[len(clean):]
+		if repl, ok := cfg.Replacements[strings.ToLower(clean)]; ok {
+			words[i] = repl + suffix
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// ----- Text output via SendInput -----
 
 func typeText(text string) error {
-	// Sanitize
+	// Sanitize: drop control chars, replace backticks
 	var clean strings.Builder
 	for _, r := range text {
-		if r == '`' {
+		switch {
+		case r == '`':
 			clean.WriteRune('\'')
-		} else if r >= 0x20 || r == '\n' || r == '\r' || r == '\t' {
+		case r == '\n', r == '\r', r == '\t':
+			clean.WriteRune(r)
+		case r < 0x20:
+			// skip control chars
+		default:
 			clean.WriteRune(r)
 		}
 	}
-	text = clean.String()
 
-	fg, _, _ := getForegroundWindow.Call()
-	if fg == 0 {
-		return fmt.Errorf("no foreground window")
+	runes := []rune(clean.String())
+	if len(runes) == 0 {
+		return nil
 	}
 
-	fgThread, _, _ := getWindowThreadPID.Call(fg, 0)
-	myThread, _, _ := getCurrentThreadId.Call()
-
-	var target uintptr
-	if fgThread != myThread {
-		attachThreadInput.Call(myThread, fgThread, 1)
-		target, _, _ = getFocus.Call()
-		if target == 0 {
-			target = fg
-		}
-		defer attachThreadInput.Call(myThread, fgThread, 0)
-	} else {
-		target = fg
-	}
-
-	count := 0
-	for _, r := range text {
-		if r == '\n' {
-			postMessage.Call(target, wmChar, 13, 0)
+	for i, r := range runes {
+		if r == '\n' || r == '\r' {
+			sendKey(vkReturn, 0) // VK_RETURN keydown+keyup
 		} else {
 			for _, c := range utf16.Encode([]rune{r}) {
-				postMessage.Call(target, wmChar, uintptr(c), 0)
+				sendUnicode(c)
 			}
 		}
-		count++
-		if count%100 == 0 {
+		// Batch pause every 100 chars so target app can process
+		if (i+1)%100 == 0 {
 			time.Sleep(time.Millisecond)
 		}
 	}
 	return nil
 }
 
-func copyToClipboard(text string) error {
+// sendUnicode sends a single Unicode character via SendInput (KEYEVENTF_UNICODE).
+func sendUnicode(ch uint16) {
+	// INPUT structure: 40 bytes on amd64
+	// [0:4] type=1 (keyboard), [4:8] pad, [8:10] vk=0, [10:12] scan=ch,
+	// [12:16] flags, [16:20] time=0, [20:24] pad, [24:32] extra=0, [32:40] pad
+	var inputs [80]byte // 2 inputs: keydown + keyup
+
+	// Keydown
+	binary.LittleEndian.PutUint32(inputs[0:4], inputKeyboard)
+	binary.LittleEndian.PutUint16(inputs[10:12], ch)
+	binary.LittleEndian.PutUint32(inputs[12:16], keyeventfUnicode)
+
+	// Keyup
+	binary.LittleEndian.PutUint32(inputs[40:44], inputKeyboard)
+	binary.LittleEndian.PutUint16(inputs[50:52], ch)
+	binary.LittleEndian.PutUint32(inputs[52:56], keyeventfUnicode|keyeventfKeyup)
+
+	pSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[0])), 40)
+}
+
+// sendKey sends a virtual key press (for Enter, etc.)
+func sendKey(vk uint16, flags uint32) {
+	var inputs [80]byte
+	binary.LittleEndian.PutUint32(inputs[0:4], inputKeyboard)
+	binary.LittleEndian.PutUint16(inputs[8:10], vk)
+	binary.LittleEndian.PutUint32(inputs[12:16], flags)
+
+	binary.LittleEndian.PutUint32(inputs[40:44], inputKeyboard)
+	binary.LittleEndian.PutUint16(inputs[48:50], vk)
+	binary.LittleEndian.PutUint32(inputs[52:56], flags|keyeventfKeyup)
+
+	pSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[0])), 40)
+}
+
+func copyToClipboard(text string) {
 	u16 := utf16.Encode([]rune(text + "\x00"))
 	size := len(u16) * 2
 
-	r, _, _ := openClipboard.Call(0)
+	r, _, _ := pOpenClipboard.Call(0)
 	if r == 0 {
-		return fmt.Errorf("OpenClipboard failed")
+		return
 	}
-	defer closeClipboard.Call()
-	emptyClipboard.Call()
+	defer pCloseClipboard.Call()
+	pEmptyClipboard.Call()
 
-	hMem, _, _ := globalAlloc.Call(gmemMoveable, uintptr(size))
+	hMem, _, _ := pGlobalAlloc.Call(gmemMoveable, uintptr(size))
 	if hMem == 0 {
-		return fmt.Errorf("GlobalAlloc failed")
+		return
 	}
-	ptr, _, _ := globalLock.Call(hMem)
+	ptr, _, _ := pGlobalLock.Call(hMem)
 	if ptr == 0 {
-		return fmt.Errorf("GlobalLock failed")
+		return
 	}
-
 	dst := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), len(u16))
 	copy(dst, u16)
-	globalUnlock.Call(hMem)
-	setClipboardData.Call(cfUnicode, hMem)
-	return nil
+	pGlobalUnlock.Call(hMem)
+	pSetClipboardData.Call(cfUnicode, hMem)
 }
 
-// --- Indicator (status dot) ---
+// ----- Screen-edge recording bar -----
+// Full-width bar at top of screen. Red while recording, amber while processing.
+// Click-through (WS_EX_TRANSPARENT), always on top, invisible when idle.
 
-var indicatorProc = syscall.NewCallback(func(hwnd, umsg, wParam, lParam uintptr) uintptr {
+const barHeight = 4
+
+var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 	switch uint32(umsg) {
 	case wmPaint:
 		var ps paintstruct
-		hdc, _, _ := beginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 
-		// Black background (color key = transparent)
-		r := rect{0, 0, 24, 24}
-		brush, _, _ := createSolidBrush.Call(0)
-		fillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
-		deleteObject.Call(brush)
-
-		// Status dot
 		var color uintptr
-		switch app.state {
+		switch state.phase {
 		case "recording":
 			color = 0x003643F4 // Red (BGR)
 		case "processing":
-			color = 0x0000BFFF // Amber
+			color = 0x0000BFFF // Amber (BGR)
 		default:
-			color = 0x0050AF4C // Green
+			color = 0 // Hidden - shouldn't be painting
 		}
 
-		dotBrush, _, _ := createSolidBrush.Call(color)
-		nullPen, _, _ := createPen.Call(5, 0, 0) // PS_NULL
-		oldBrush, _, _ := selectObject.Call(hdc, dotBrush)
-		oldPen, _, _ := selectObject.Call(hdc, nullPen)
-		ellipse.Call(hdc, 2, 2, 22, 22)
-		selectObject.Call(hdc, oldBrush)
-		selectObject.Call(hdc, oldPen)
-		deleteObject.Call(dotBrush)
-		deleteObject.Call(nullPen)
+		brush, _, _ := pCreateSolidBrush.Call(color)
+		sw, _, _ := pGetSystemMetrics.Call(0) // SM_CXSCREEN
+		r := [4]int32{0, 0, int32(sw), barHeight}
+		pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
+		pDeleteObject.Call(brush)
 
-		endPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-		return 0
-
-	case wmLButtonUp:
-		go toggle(true) // Click = clipboard mode
+		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 
 	case wmTimer:
-		// Heartbeat: make sure we're still visible and on screen
-		if app.state == "recording" || app.state == "processing" {
-			showWindow.Call(hwnd, swShowNA)
-			setWindowPos.Call(hwnd, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010) // TOPMOST|NOSIZE|NOMOVE|NOACTIVATE
+		// Heartbeat: detect sleep/wake (30s+ gap = system was sleeping)
+		now := time.Now()
+		if now.Sub(state.lastWake) > 60*time.Second {
+			log("Wake detected, pinging server")
+			go healthCheck()
 		}
+		state.lastWake = now
 		return 0
 	}
 
-	r, _, _ := defWindowProc.Call(hwnd, umsg, wParam, lParam)
+	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
 	return r
 })
 
-func createIndicator() {
-	cls := utf16p("CogFlowDot")
-	cursor, _, _ := loadCursor.Call(0, 32512)
-
-	wc := wndclassex{
-		Size: uint32(unsafe.Sizeof(wndclassex{})), WndProc: indicatorProc,
+func createBar() {
+	cls := utf16p("CogFlowBar")
+	cursor, _, _ := pLoadCursor.Call(0, 32512) // IDC_ARROW
+	wc := wndclass{
+		Size: uint32(unsafe.Sizeof(wndclass{})), WndProc: barProc,
 		ClassName: cls, Cursor: cursor,
 	}
-	registerClassEx.Call(uintptr(unsafe.Pointer(&wc)))
+	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
-	sw, _, _ := getSystemMetrics.Call(0)
-	sh, _, _ := getSystemMetrics.Call(1)
-	x := int32(sw) - 24 - 16
-	y := int32(sh) - 24 - 56
-
-	hwnd, _, _ := createWindowEx.Call(
-		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate,
-		uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(utf16p("CogFlow"))),
-		wsPopup, uintptr(x), uintptr(y), 24, 24, 0, 0, 0, 0,
+	sw, _, _ := pGetSystemMetrics.Call(0)
+	hwnd, _, _ := pCreateWindowEx.Call(
+		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
+		uintptr(unsafe.Pointer(cls)), 0,
+		wsPopup, 0, 0, sw, barHeight, 0, 0, 0, 0,
 	)
-	app.indicator = hwnd
+	state.bar = hwnd
 
-	// Black = transparent
-	setLayeredWindowAttr.Call(hwnd, 0, 0, lwaColorKey)
-	showWindow.Call(hwnd, swShowNA)
+	// Black = transparent (won't see anything until we show it with a color)
+	pSetLayeredWindowAttr.Call(hwnd, 0, 220, lwaAlpha) // Slightly transparent
 
-	// Heartbeat every 30s
-	setTimer.Call(hwnd, 1, 30000, 0)
+	// Start hidden
+	pShowWindow.Call(hwnd, 0) // SW_HIDE
+
+	// Heartbeat timer for sleep/wake detection
+	pSetTimer.Call(hwnd, timerHeartbeat, 30000, 0)
 }
 
-func setState(state string) {
-	app.state = state
-	if app.indicator != 0 {
-		invalidateRect.Call(app.indicator, 0, 1)
-		if state == "recording" || state == "processing" {
-			showWindow.Call(app.indicator, swShowNA)
-		}
+func setPhase(phase string) {
+	state.phase = phase
+
+	switch phase {
+	case "recording", "processing":
+		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
+		pInvalidateRect.Call(state.bar, 0, 1)
+		// Ensure topmost
+		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
+	default:
+		pShowWindow.Call(state.bar, 0) // SW_HIDE
 	}
+
 	updateTrayIcon()
 }
 
-// --- System tray ---
+// ----- System tray -----
 
-var trayProc = syscall.NewCallback(func(hwnd, umsg, wParam, lParam uintptr) uintptr {
+const (
+	menuToggle = 1
+	menuQuit   = 2
+)
+
+var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 	switch uint32(umsg) {
 	case wmTrayIcon:
-		switch uint16(lParam) {
-		case uint16(wmRButtonUp):
-			showTrayMenu(hwnd)
+		if uint16(lp) == uint16(wmRButtonUp) {
+			showMenu(hwnd)
 		}
 		return 0
-
 	case wmCommand:
-		switch uint16(wParam) {
-		case 1: // Settings placeholder
-			log("Settings not yet implemented")
-		case 2: // Toggle hotkey
-			app.hotkeyEnabled = !app.hotkeyEnabled
-			if app.hotkeyEnabled {
-				log("Hotkey enabled")
-			} else {
-				log("Hotkey disabled")
+		switch uint16(wp) {
+		case menuToggle:
+			state.enabled = !state.enabled
+			s := "enabled"
+			if !state.enabled {
+				s = "disabled"
 			}
-		case 3: // Reset overlay
-			sw, _, _ := getSystemMetrics.Call(0)
-			sh, _, _ := getSystemMetrics.Call(1)
-			moveWindow.Call(app.indicator, uintptr(int32(sw)-40), uintptr(int32(sh)-80), 24, 24, 1)
-		case 9: // Quit
-			app.running = false
-			shellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&app.nid)))
-			postQuitMessage.Call(0)
+			log("Hotkey %s via menu", s)
+		case menuQuit:
+			shutdown()
+			pPostQuitMessage.Call(0)
 		}
 		return 0
 	}
-
-	r, _, _ := defWindowProc.Call(hwnd, umsg, wParam, lParam)
+	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
 	return r
 })
 
 func createTray() {
 	cls := utf16p("CogFlowTray")
-	wc := wndclassex{
-		Size: uint32(unsafe.Sizeof(wndclassex{})), WndProc: trayProc, ClassName: cls,
+	wc := wndclass{
+		Size: uint32(unsafe.Sizeof(wndclass{})), WndProc: trayProc, ClassName: cls,
 	}
-	registerClassEx.Call(uintptr(unsafe.Pointer(&wc)))
+	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
-	hwnd, _, _ := createWindowEx.Call(0,
-		uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(utf16p("CogFlowTrayHost"))),
+	hwnd, _, _ := pCreateWindowEx.Call(0,
+		uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(utf16p(""))),
 		0, 0, 0, 0, 0, 0, 0, 0, 0,
 	)
-	app.trayHwnd = hwnd
+	state.trayHwnd = hwnd
 
-	app.nid = notifyicondata{
-		Size:        uint32(unsafe.Sizeof(notifyicondata{})),
+	state.trayNID = notifyicon{
+		Size:        uint32(unsafe.Sizeof(notifyicon{})),
 		Hwnd:        hwnd,
 		ID:          1,
 		Flags:       nifMsg | nifIcon | nifTip | nifShowTip,
 		CallbackMsg: wmTrayIcon,
 	}
+	tip, _ := syscall.UTF16FromString(fmt.Sprintf("Cognitive Flow v%s", version))
+	copy(state.trayNID.Tip[:], tip)
 
-	tip := utf16f("Cognitive Flow v%s", version)
-	copy(app.nid.Tip[:], tip)
-	app.nid.Icon = makeIcon(76, 175, 80) // Green
+	state.trayIcon = makeIcon(76, 175, 80) // Green
+	state.trayNID.Icon = state.trayIcon
 
-	shellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&app.nid)))
+	pShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&state.trayNID)))
 }
 
-func showTrayMenu(hwnd uintptr) {
-	hMenu, _, _ := createPopupMenu.Call()
+func showMenu(hwnd uintptr) {
+	h, _, _ := pCreatePopupMenu.Call()
 
-	addMenuItem(hMenu, 1, "Settings...")
-
-	hotkeyLabel := "Hotkey Enabled"
 	flags := uintptr(mfString)
-	if app.hotkeyEnabled {
+	if state.enabled {
 		flags |= mfChecked
 	}
-	appendMenu.Call(hMenu, flags, 2, uintptr(unsafe.Pointer(utf16p(hotkeyLabel))))
+	pAppendMenu.Call(h, flags, menuToggle, uintptr(unsafe.Pointer(utf16p("Hotkey Enabled"))))
+	pAppendMenu.Call(h, mfSeparator, 0, 0)
+	pAppendMenu.Call(h, mfString, menuQuit, uintptr(unsafe.Pointer(utf16p("Quit"))))
 
-	addMenuItem(hMenu, 3, "Reset Overlay Position")
-	appendMenu.Call(hMenu, mfSeparator, 0, 0)
-	addMenuItem(hMenu, 9, "Quit")
-
-	var pt point
-	getCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
-	setForegroundWindow.Call(hwnd)
-	trackPopupMenu.Call(hMenu, 0x0020, uintptr(pt.X), uintptr(pt.Y), 0, hwnd, 0)
-	destroyMenu.Call(hMenu)
-}
-
-func addMenuItem(hMenu uintptr, id int, text string) {
-	appendMenu.Call(hMenu, mfString, uintptr(id), uintptr(unsafe.Pointer(utf16p(text))))
+	var pt [2]int32
+	pGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	pSetForegroundWindow.Call(hwnd)
+	pTrackPopupMenu.Call(h, 0x0020, uintptr(pt[0]), uintptr(pt[1]), 0, hwnd, 0)
+	pDestroyMenu.Call(h)
 }
 
 func updateTrayIcon() {
 	var r, g, b byte
-	switch app.state {
+	switch state.phase {
 	case "recording":
 		r, g, b = 244, 67, 54
 	case "processing":
@@ -944,86 +1027,75 @@ func updateTrayIcon() {
 		r, g, b = 76, 175, 80
 	}
 
-	old := app.nid.Icon
-	app.nid.Icon = makeIcon(r, g, b)
-	app.nid.Flags = nifIcon
-	shellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&app.nid)))
+	old := state.trayIcon
+	state.trayIcon = makeIcon(r, g, b)
+	state.trayNID.Icon = state.trayIcon
+	state.trayNID.Flags = nifIcon
+	pShellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&state.trayNID)))
 	if old != 0 {
-		destroyIcon.Call(old)
+		pDestroyIcon.Call(old)
 	}
 }
 
+func notify(title, msg string) {
+	t, _ := syscall.UTF16FromString(title)
+	m, _ := syscall.UTF16FromString(msg)
+	copy(state.trayNID.InfoTitle[:], t)
+	copy(state.trayNID.Info[:], m)
+	state.trayNID.Flags = nifInfo
+	state.trayNID.InfoFlags = niiInfo
+	pShellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&state.trayNID)))
+}
+
 func makeIcon(r, g, b byte) uintptr {
-	size := 16
-	hdc, _, _ := getDC.Call(0)
-
-	bmi := bitmapinfo{Header: bitmapinfoheader{
-		Size: uint32(unsafe.Sizeof(bitmapinfoheader{})),
-		Width: int32(size), Height: -int32(size), Planes: 1, BitCount: 32,
-	}}
-
+	hdc, _, _ := pGetDC.Call(0)
+	bmi := bmpinfo{
+		Size: uint32(unsafe.Sizeof(bmpinfo{})),
+		Width: 16, Height: -16, Planes: 1, Bits: 32,
+	}
 	var bits uintptr
-	hbm, _, _ := createDIBSection.Call(hdc, uintptr(unsafe.Pointer(&bmi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
-	releaseDC.Call(0, hdc)
-
-	if hbm == 0 || bits == 0 {
+	hbm, _, _ := pCreateDIBSection.Call(hdc, uintptr(unsafe.Pointer(&bmi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
+	pReleaseDC.Call(0, hdc)
+	if hbm == 0 {
 		return 0
 	}
 
-	// Draw circle in BGRA
-	pixels := unsafe.Slice((*byte)(unsafe.Pointer(bits)), size*size*4)
-	cx, cy, rad := float64(size)/2, float64(size)/2, float64(size)/2-1
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
+	px := unsafe.Slice((*byte)(unsafe.Pointer(bits)), 16*16*4)
+	cx, cy, rad := 8.0, 8.0, 7.0
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
 			dx, dy := float64(x)-cx+0.5, float64(y)-cy+0.5
 			if math.Sqrt(dx*dx+dy*dy) <= rad {
-				off := (y*size + x) * 4
-				pixels[off+0] = b
-				pixels[off+1] = g
-				pixels[off+2] = r
-				pixels[off+3] = 255
+				o := (y*16 + x) * 4
+				px[o], px[o+1], px[o+2], px[o+3] = b, g, r, 255
 			}
 		}
 	}
 
-	// Mask bitmap
-	hdc2, _, _ := getDC.Call(0)
-	var maskBits uintptr
-	hbmMask, _, _ := createDIBSection.Call(hdc2, uintptr(unsafe.Pointer(&bmi)), 0, uintptr(unsafe.Pointer(&maskBits)), 0, 0)
-	releaseDC.Call(0, hdc2)
+	hdc2, _, _ := pGetDC.Call(0)
+	var mbits uintptr
+	hmask, _, _ := pCreateDIBSection.Call(hdc2, uintptr(unsafe.Pointer(&bmi)), 0, uintptr(unsafe.Pointer(&mbits)), 0, 0)
+	pReleaseDC.Call(0, hdc2)
 
-	ii := iconinfo{IsIcon: 1, Mask: hbmMask, Color: hbm}
-	icon, _, _ := createIconIndirect.Call(uintptr(unsafe.Pointer(&ii)))
-
-	deleteObject.Call(hbm)
-	deleteObject.Call(hbmMask)
+	ii := iconinfo{IsIcon: 1, Mask: hmask, Color: hbm}
+	icon, _, _ := pCreateIconIndirect.Call(uintptr(unsafe.Pointer(&ii)))
+	pDeleteObject.Call(hbm)
+	pDeleteObject.Call(hmask)
 	return icon
 }
 
-// --- Helpers ---
-
-func peekMsg(m *msg) bool {
-	r, _, _ := peekMessage.Call(uintptr(unsafe.Pointer(m)), 0, 0, 0, pmRemove)
-	return r != 0
-}
+// ----- Helpers -----
 
 func utf16p(s string) *uint16 {
 	p, _ := syscall.UTF16PtrFromString(s)
 	return p
 }
 
-func utf16f(format string, args ...interface{}) []uint16 {
-	s := fmt.Sprintf(format, args...)
-	p, _ := syscall.UTF16FromString(s)
-	return p
+func log(f string, a ...interface{}) {
+	fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(f, a...))
 }
 
-func log(format string, args ...interface{}) {
-	ts := time.Now().Format("15:04:05")
-	fmt.Printf("[%s] %s\n", ts, fmt.Sprintf(format, args...))
-}
-
-func fatal(format string, args ...interface{}) {
-	log("FATAL: "+format, args...)
+func fatal(f string, a ...interface{}) {
+	log("FATAL: "+f, a...)
 	os.Exit(1)
 }
