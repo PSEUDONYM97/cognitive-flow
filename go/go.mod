@@ -1,4 +1,4 @@
-module github.com/PSEUDONYM97/cognitive-flow
+module cognitive-flow
 
 go 1.22
 
