@@ -108,6 +108,7 @@ var (
 	pGetDC               = user32.NewProc("GetDC")
 	pReleaseDC           = user32.NewProc("ReleaseDC")
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	pPostMessage         = user32.NewProc("PostMessageW")
 	pCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
 	pAppendMenu          = user32.NewProc("AppendMenuW")
 	pTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -153,6 +154,7 @@ const (
 	wmCommand    = 0x0111
 	wmApp        = 0x8000
 	wmTrayIcon   = wmApp + 1
+	wmSetPhase   = wmApp + 2 // custom: wp=phase, triggers UI update on main thread
 	wmRButtonUp  = 0x0205
 	wmLButtonUp  = 0x0202
 	wmNcHitTest  = 0x0084
@@ -1006,6 +1008,10 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			state.lastWake = now
 		}
 		return 0
+
+	case wmSetPhase:
+		applyPhase(int32(wp))
+		return 0
 	}
 
 	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
@@ -1156,32 +1162,46 @@ func createDot() {
 
 func setPhase(p int32) {
 	setPhaseVal(p)
+	// Post to bar window so UI update happens on main thread.
+	// Calling ShowWindow/SetTimer from goroutines deadlocks the message pump.
+	if state.bar != 0 {
+		pPostMessage.Call(state.bar, wmSetPhase, uintptr(p), 0)
+	}
+}
 
+// applyPhase runs on the main thread via the bar's wndproc.
+func applyPhase(p int32) {
 	switch p {
 	case phaseRecording:
 		audioLevel.Store(0)
 		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-		// Fast repaint timer for audio level visualization (50ms = 20fps)
 		pSetTimer.Call(state.bar, timerRepaint, 50, 0)
-		pSetTimer.Call(state.dot, timerRepaint, 50, 0)
+		if state.dot != 0 {
+			pSetTimer.Call(state.dot, timerRepaint, 50, 0)
+			pInvalidateRect.Call(state.dot, 0, 1)
+		}
 	case phaseProcessing:
 		pKillTimer.Call(state.bar, timerRepaint)
-		pKillTimer.Call(state.dot, timerRepaint)
 		audioLevel.Store(0)
 		sw, _, _ := pGetSystemMetrics.Call(0)
 		pMoveWindow.Call(state.bar, 0, 0, sw, barMinHeight, 1)
 		pShowWindow.Call(state.bar, 8)
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-		pInvalidateRect.Call(state.dot, 0, 1)
+		if state.dot != 0 {
+			pKillTimer.Call(state.dot, timerRepaint)
+			pInvalidateRect.Call(state.dot, 0, 1)
+		}
 	default:
 		pKillTimer.Call(state.bar, timerRepaint)
-		pKillTimer.Call(state.dot, timerRepaint)
 		audioLevel.Store(0)
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
-		pInvalidateRect.Call(state.dot, 0, 1)
+		if state.dot != 0 {
+			pKillTimer.Call(state.dot, timerRepaint)
+			pInvalidateRect.Call(state.dot, 0, 1)
+		}
 	}
 
 	updateTrayIcon()
