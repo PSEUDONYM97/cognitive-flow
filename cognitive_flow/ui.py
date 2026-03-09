@@ -149,7 +149,12 @@ class SettingsDialog(QDialog):
         close_btn.clicked.connect(self.close)
         close_btn.setObjectName("closeButton")
         
+        from . import __version__
+        version_label = QLabel(f"v{__version__}")
+        version_label.setStyleSheet(f"color: {COLORS['text_muted'].name()}; font-size: 11px;")
+
         header_layout.addWidget(title)
+        header_layout.addWidget(version_label)
         header_layout.addStretch()
         header_layout.addWidget(close_btn)
         

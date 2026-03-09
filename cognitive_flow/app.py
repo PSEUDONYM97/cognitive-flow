@@ -16,6 +16,7 @@ import sys
 import hashlib
 from datetime import datetime
 from pathlib import Path
+from . import __version__
 
 # These get set during init_app()
 GPU_AVAILABLE = False
@@ -858,7 +859,7 @@ class SystemTray:
         self.icon = pystray.Icon(
             "CognitiveFlow",
             self.create_icon(loading=True),
-            "Cognitive Flow - Loading...",
+            f"Cognitive Flow v{__version__} - Loading...",
             menu
         )
         
@@ -1224,7 +1225,7 @@ class CognitiveFlowApp:
 
                 if self.tray:
                     self.tray.update_icon(recording=False, loading=False)
-                    self.tray.icon.title = f"Cognitive Flow - {status}"
+                    self.tray.icon.title = f"Cognitive Flow v{__version__} - {status}"
                 if self.ui:
                     self.ui.set_state("idle", status)
 
@@ -1846,8 +1847,7 @@ def main():
     import signal
     import argparse
     import subprocess
-    from . import __version__
-    
+
     parser = argparse.ArgumentParser(description="Cognitive Flow - Local voice-to-text")
     parser.add_argument("--debug", action="store_true", help="Run in foreground with debug output")
     parser.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)  # Internal flag

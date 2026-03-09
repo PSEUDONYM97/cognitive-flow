@@ -192,6 +192,9 @@ All notable changes to Cognitive Flow are documented here.
 - Only retries when warmup confirmed server alive, no retries for cold/unknown state
 - Shows retry attempt count in logs: "retry 1/3 in 5s..."
 
+## v1.21.1
+- Version number shown in system tray tooltip and settings dialog header
+
 ## v1.21.0
 - Retry always copies to clipboard instead of typing
 - Click indicator to stop recording switches to clipboard mode (tilde start + click stop = clipboard)
