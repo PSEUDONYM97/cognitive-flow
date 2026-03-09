@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -293,6 +294,19 @@ type iconinfo struct {
 	Mask, Color  uintptr
 }
 
+// ----- Phase (atomic, safe to read from paint callback while written from goroutines) -----
+
+const (
+	phaseIdle       int32 = 0
+	phaseRecording  int32 = 1
+	phaseProcessing int32 = 2
+)
+
+var phase atomic.Int32
+
+func currentPhase() int32  { return phase.Load() }
+func setPhaseVal(p int32)  { phase.Store(p) }
+
 // ----- App state -----
 
 var state struct {
@@ -309,7 +323,6 @@ var state struct {
 	trayHwnd uintptr
 	trayNID  notifyicon
 	trayIcon uintptr
-	phase    string // "idle", "recording", "processing"
 
 	stopCh chan struct{} // signal recordLoop to stop
 }
@@ -321,7 +334,7 @@ func main() {
 
 	state.enabled = true
 	state.running = true
-	state.phase = "idle"
+	setPhaseVal(phaseIdle)
 	state.lastWake = time.Now()
 
 	log("Cognitive Flow v%s", version)
@@ -469,13 +482,13 @@ func cancel() {
 		close(state.stopCh)
 		state.stopCh = nil
 	}
-	setPhase("idle")
+	setPhase(phaseIdle)
 }
 
 func startRecording() {
 	log("Recording (clipboard: %v)", state.clipboardMode)
 	state.recording = true
-	setPhase("recording")
+	setPhase(phaseRecording)
 
 	// Warm server while user speaks
 	go healthCheck()
@@ -495,13 +508,13 @@ func startRecording() {
 
 		if len(frames) == 0 {
 			log("No audio captured")
-			setPhase("idle")
+			setPhase(phaseIdle)
 			return
 		}
 
 		dur := float64(len(frames)) / sampleRate
 		log("Captured %.1fs", dur)
-		setPhase("processing")
+		setPhase(phaseProcessing)
 		transcribe(frames, clipboard)
 	}()
 }
@@ -679,14 +692,14 @@ func transcribe(samples []int16, clipboard bool) {
 	if lastErr != nil {
 		log("Transcription failed: %v", lastErr)
 		notify("Transcription failed", lastErr.Error())
-		setPhase("idle")
+		setPhase(phaseIdle)
 		return
 	}
 
 	text := strings.TrimSpace(result.Text)
 	if text == "" {
 		log("Empty transcription")
-		setPhase("idle")
+		setPhase(phaseIdle)
 		return
 	}
 
@@ -708,7 +721,7 @@ func transcribe(samples []int16, clipboard bool) {
 		}
 	}
 
-	setPhase("idle")
+	setPhase(phaseIdle)
 }
 
 func encodeWAV(samples []int16) []byte {
@@ -860,13 +873,13 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 		hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 
 		var color uintptr
-		switch state.phase {
-		case "recording":
+		switch currentPhase() {
+		case phaseRecording:
 			color = 0x003643F4 // Red (BGR)
-		case "processing":
+		case phaseProcessing:
 			color = 0x0000BFFF // Amber (BGR)
 		default:
-			color = 0 // Hidden - shouldn't be painting
+			color = 0
 		}
 
 		brush, _, _ := pCreateSolidBrush.Call(color)
@@ -920,14 +933,13 @@ func createBar() {
 	pSetTimer.Call(hwnd, timerHeartbeat, 30000, 0)
 }
 
-func setPhase(phase string) {
-	state.phase = phase
+func setPhase(p int32) {
+	setPhaseVal(p)
 
-	switch phase {
-	case "recording", "processing":
+	switch p {
+	case phaseRecording, phaseProcessing:
 		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
 		pInvalidateRect.Call(state.bar, 0, 1)
-		// Ensure topmost
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
 	default:
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
@@ -1018,10 +1030,10 @@ func showMenu(hwnd uintptr) {
 
 func updateTrayIcon() {
 	var r, g, b byte
-	switch state.phase {
-	case "recording":
+	switch currentPhase() {
+	case phaseRecording:
 		r, g, b = 244, 67, 54
-	case "processing":
+	case phaseProcessing:
 		r, g, b = 255, 191, 0
 	default:
 		r, g, b = 76, 175, 80
