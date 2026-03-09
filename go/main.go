@@ -328,6 +328,15 @@ var state struct {
 // ----- Entry point -----
 
 func main() {
+	// Minimal flag handling
+	for _, a := range os.Args[1:] {
+		switch a {
+		case "--version", "-v":
+			fmt.Printf("Cognitive Flow v%s (Go)\n", version)
+			os.Exit(0)
+		}
+	}
+
 	loadConfig()
 
 	state.enabled = true
