@@ -10,7 +10,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -169,7 +171,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.3.0"
+	version = "2.4.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -403,6 +405,12 @@ func main() {
 			log("Server ready")
 		}
 	}()
+
+	// Check for updates
+	go checkForUpdate()
+
+	// Apply pending update from last run (if cogflow-update.exe exists)
+	applyPendingUpdate()
 
 	// Create UI
 	createBar()
@@ -741,6 +749,213 @@ func stopRecording() {
 		close(audio.stopCh)
 		audio.stopCh = nil
 	}
+}
+
+// ----- Self-update -----
+// Pull-based: app checks GitHub releases, downloads if newer, verifies SHA256.
+// Flow: checkForUpdate() -> notify user -> downloadUpdate() -> verify -> restart
+
+const githubRepo = "PSEUDONYM97/cognitive-flow"
+
+var updateAvailable string // set to new version if update found
+
+func checkForUpdate() {
+	c := &http.Client{Timeout: 10 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo))
+	if err != nil {
+		return // silently fail - not critical
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return
+	}
+
+	remote := strings.TrimPrefix(release.TagName, "v")
+	if remote == "" || remote == version {
+		return
+	}
+
+	if compareVersions(remote, version) > 0 {
+		updateAvailable = remote
+		log("Update available: v%s -> v%s", version, remote)
+		notify("Update available", fmt.Sprintf("v%s is available (you have v%s). Right-click tray to update.", remote, version))
+	}
+}
+
+func compareVersions(a, b string) int {
+	pa := strings.Split(a, ".")
+	pb := strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		var va, vb int
+		if i < len(pa) {
+			fmt.Sscanf(pa[i], "%d", &va)
+		}
+		if i < len(pb) {
+			fmt.Sscanf(pb[i], "%d", &vb)
+		}
+		if va > vb {
+			return 1
+		}
+		if va < vb {
+			return -1
+		}
+	}
+	return 0
+}
+
+func downloadUpdate() {
+	log("Downloading update v%s...", updateAvailable)
+	notify("Downloading update", fmt.Sprintf("Downloading v%s...", updateAvailable))
+
+	c := &http.Client{Timeout: 60 * time.Second}
+
+	// Get release assets
+	resp, err := c.Get(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo))
+	if err != nil {
+		log("Update failed: %v", err)
+		notify("Update failed", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	var release struct {
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	json.NewDecoder(resp.Body).Decode(&release)
+
+	// Find the .exe and .sha256 assets
+	var exeURL, shaURL string
+	for _, a := range release.Assets {
+		if strings.HasSuffix(a.Name, ".exe") {
+			exeURL = a.URL
+		}
+		if strings.HasSuffix(a.Name, ".sha256") {
+			shaURL = a.URL
+		}
+	}
+
+	if exeURL == "" {
+		log("Update failed: no .exe in release assets")
+		notify("Update failed", "No binary in release")
+		return
+	}
+
+	// Download binary
+	exeResp, err := c.Get(exeURL)
+	if err != nil {
+		log("Update download failed: %v", err)
+		notify("Update failed", err.Error())
+		return
+	}
+	defer exeResp.Body.Close()
+
+	exeData, err := io.ReadAll(exeResp.Body)
+	if err != nil {
+		log("Update read failed: %v", err)
+		notify("Update failed", err.Error())
+		return
+	}
+
+	// Verify SHA256 if available
+	if shaURL != "" {
+		shaResp, err := c.Get(shaURL)
+		if err == nil {
+			defer shaResp.Body.Close()
+			shaData, _ := io.ReadAll(shaResp.Body)
+			expectedHash := strings.TrimSpace(strings.Fields(string(shaData))[0])
+
+			actualHash := sha256.Sum256(exeData)
+			actualHex := hex.EncodeToString(actualHash[:])
+
+			if actualHex != expectedHash {
+				log("UPDATE REJECTED: SHA256 mismatch!")
+				log("  Expected: %s", expectedHash)
+				log("  Got:      %s", actualHex)
+				notify("Update rejected", "SHA256 verification failed - binary may be tampered")
+				return
+			}
+			log("SHA256 verified: %s", actualHex[:16]+"...")
+		}
+	} else {
+		log("Warning: no .sha256 asset, skipping verification")
+	}
+
+	// Write to cogflow-update.exe next to current binary
+	exe, _ := os.Executable()
+	updatePath := filepath.Join(filepath.Dir(exe), "cogflow-update.exe")
+	if err := os.WriteFile(updatePath, exeData, 0755); err != nil {
+		log("Update write failed: %v", err)
+		notify("Update failed", err.Error())
+		return
+	}
+
+	log("Update downloaded to %s (%.1fMB)", updatePath, float64(len(exeData))/1024/1024)
+	notify("Update ready", fmt.Sprintf("v%s downloaded. Restart cogflow to apply.", updateAvailable))
+	updateAvailable = "" // clear so menu item changes
+}
+
+// applyPendingUpdate checks for cogflow-update.exe and swaps it in.
+func applyPendingUpdate() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(exe)
+	updatePath := filepath.Join(dir, "cogflow-update.exe")
+	oldPath := filepath.Join(dir, "cogflow-old.exe")
+
+	if _, err := os.Stat(updatePath); os.IsNotExist(err) {
+		return
+	}
+
+	log("Applying pending update...")
+
+	// Remove old backup if exists
+	os.Remove(oldPath)
+
+	// Rename current -> old
+	if err := os.Rename(exe, oldPath); err != nil {
+		log("Update apply failed (rename current): %v", err)
+		return
+	}
+
+	// Rename update -> current
+	if err := os.Rename(updatePath, exe); err != nil {
+		// Rollback
+		os.Rename(oldPath, exe)
+		log("Update apply failed (rename new): %v", err)
+		return
+	}
+
+	log("Update applied! Restarting...")
+
+	// Relaunch ourselves
+	cmd := fmt.Sprintf("cmd /c timeout /t 1 /nobreak >nul & start \"\" \"%s\"", exe)
+	pCreateProcess := kernel32.NewProc("CreateProcessW")
+	cmdW, _ := syscall.UTF16PtrFromString(cmd)
+	var si [68]byte // STARTUPINFO
+	binary.LittleEndian.PutUint32(si[:4], 68)
+	var pi [24]byte // PROCESS_INFORMATION
+	pCreateProcess.Call(0, uintptr(unsafe.Pointer(cmdW)), 0, 0, 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(&si)), uintptr(unsafe.Pointer(&pi)))
+
+	// Exit current process
+	os.Exit(0)
 }
 
 // ----- Audio capture loop -----
@@ -1180,6 +1395,15 @@ func saveHistory(text string, durS float64, serverMs float64, totalMs int64) {
 
 // ----- Text output via SendInput -----
 
+var (
+	pGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
+	pGetWindowThreadProcId  = user32.NewProc("GetWindowThreadProcessId")
+	pAttachThreadInput      = user32.NewProc("AttachThreadInput")
+	pGetFocus               = user32.NewProc("GetFocus")
+)
+
+const wmChar = 0x0102
+
 func typeText(text string) error {
 	// Sanitize: drop control chars, replace backticks
 	var clean strings.Builder
@@ -1201,15 +1425,42 @@ func typeText(text string) error {
 		return nil
 	}
 
+	// Attach to the foreground window's thread to get the real focus handle,
+	// then post WM_CHAR directly. This bypasses the input system entirely -
+	// no hooks, no keyboard layout processing, no per-char DOM re-renders.
+	// This is what the Python version did and it was fast.
+	fg, _, _ := pGetForegroundWindow.Call()
+	if fg == 0 {
+		return fmt.Errorf("no foreground window")
+	}
+
+	fgThread, _, _ := pGetWindowThreadProcId.Call(fg, 0)
+	myThread, _, _ := pGetCurrentThreadId.Call()
+
+	attached := false
+	if fgThread != myThread {
+		r, _, _ := pAttachThreadInput.Call(myThread, fgThread, 1)
+		attached = r != 0
+	}
+
+	focus, _, _ := pGetFocus.Call()
+	if focus == 0 {
+		focus = fg // fallback to foreground window itself
+	}
+
+	if attached {
+		pAttachThreadInput.Call(myThread, fgThread, 0)
+	}
+
+	// Post WM_CHAR for each character
 	for i, r := range runes {
 		if r == '\n' || r == '\r' {
-			sendKey(vkReturn, 0) // VK_RETURN keydown+keyup
+			pPostMessage.Call(focus, 0x0100, vkReturn, 0)    // WM_KEYDOWN
+			pPostMessage.Call(focus, 0x0101, vkReturn, 0)    // WM_KEYUP
 		} else {
-			for _, c := range utf16.Encode([]rune{r}) {
-				sendUnicode(c)
-			}
+			pPostMessage.Call(focus, wmChar, uintptr(r), 0)
 		}
-		// Batch pause every 100 chars so target app can process
+		// Brief yield every 100 chars so target app can process
 		if (i+1)%100 == 0 {
 			time.Sleep(time.Millisecond)
 		}
@@ -1667,7 +1918,7 @@ const (
 	menuQuit       = 2
 	menuPauseMedia = 3
 	menuShowHide   = 4
-	menuResetPos   = 5
+	menuUpdate     = 6
 )
 
 var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
@@ -1702,6 +1953,8 @@ var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 				pShowWindow.Call(ind.hwnd, 8) // SW_SHOWNA
 				state.indVisible = true
 			}
+		case menuUpdate:
+			go downloadUpdate()
 		case menuQuit:
 			shutdown()
 			pPostQuitMessage.Call(0)
@@ -1766,6 +2019,11 @@ func showMenu(hwnd uintptr) {
 		label = "Show Indicator"
 	}
 	pAppendMenu.Call(h, mfString, menuShowHide, uintptr(unsafe.Pointer(utf16p(label))))
+
+	// Update available
+	if updateAvailable != "" {
+		pAppendMenu.Call(h, mfString, menuUpdate, uintptr(unsafe.Pointer(utf16p(fmt.Sprintf("Update to v%s", updateAvailable)))))
+	}
 
 	pAppendMenu.Call(h, mfSeparator, 0, 0)
 	pAppendMenu.Call(h, mfString, menuQuit, uintptr(unsafe.Pointer(utf16p("Quit"))))
