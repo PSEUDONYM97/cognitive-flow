@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -174,7 +175,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.6.0"
+	version = "2.7.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -415,6 +416,9 @@ func main() {
 			log("Server ready")
 		}
 	}()
+
+	// Start local dashboard server
+	startDashboard()
 
 	// Check for updates
 	go checkForUpdate()
@@ -968,6 +972,359 @@ func applyPendingUpdate() {
 	// Exit current process
 	os.Exit(0)
 }
+
+// ----- Web dashboard -----
+// Local HTTP server for history browsing, stats, and vocabulary management.
+// Binds to 127.0.0.1 only - never exposed to network.
+
+var dashboardPort int
+
+func startDashboard() {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log("Dashboard server failed: %v", err)
+		return
+	}
+	dashboardPort = ln.Addr().(*net.TCPAddr).Port
+	log("Dashboard: http://127.0.0.1:%d", dashboardPort)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleDashboard)
+	mux.HandleFunc("/api/history", handleAPIHistory)
+	mux.HandleFunc("/api/stats", handleAPIStats)
+	mux.HandleFunc("/api/vocab", handleAPIVocab)
+	mux.HandleFunc("/api/vocab/add", handleAPIVocabAdd)
+	mux.HandleFunc("/api/vocab/delete", handleAPIVocabDelete)
+
+	go http.Serve(ln, mux)
+}
+
+func openDashboard(fragment string) {
+	if dashboardPort == 0 {
+		return
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/%s", dashboardPort, fragment)
+	p, _ := syscall.UTF16PtrFromString(url)
+	pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
+}
+
+func handleAPIHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	path := filepath.Join(configDir(), "history.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	w.Write(data)
+}
+
+func handleAPIStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	path := filepath.Join(configDir(), "history.json")
+	var history []historyEntry
+	if data, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(data, &history)
+	}
+
+	var totalDur, totalServer float64
+	var totalTotal int64
+	for _, h := range history {
+		totalDur += h.DurationS
+		totalServer += h.ServerMs
+		totalTotal += h.TotalMs
+	}
+
+	n := len(history)
+	avgServer := 0.0
+	avgTotal := int64(0)
+	if n > 0 {
+		avgServer = totalServer / float64(n)
+		avgTotal = totalTotal / int64(n)
+	}
+
+	uptime := time.Since(state.startTime)
+
+	stats := map[string]interface{}{
+		"version":          version,
+		"uptime_s":         int(uptime.Seconds()),
+		"session_count":    state.recentCount,
+		"total_count":      n,
+		"total_audio_s":    totalDur,
+		"avg_server_ms":    avgServer,
+		"avg_total_ms":     avgTotal,
+		"server":           cfg.Server,
+	}
+	json.NewEncoder(w).Encode(stats)
+}
+
+func handleAPIVocab(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfg.Replacements)
+}
+
+func handleAPIVocabAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.From == "" {
+		http.Error(w, "missing 'from'", 400)
+		return
+	}
+	cfg.Replacements[req.From] = req.To
+	saveConfig()
+	log("Vocab added: %q -> %q", req.From, req.To)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfg.Replacements)
+}
+
+func handleAPIVocabDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		From string `json:"from"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	delete(cfg.Replacements, req.From)
+	saveConfig()
+	log("Vocab removed: %q", req.From)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfg.Replacements)
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Load history
+	histPath := filepath.Join(configDir(), "history.json")
+	var history []historyEntry
+	if data, err := os.ReadFile(histPath); err == nil {
+		json.Unmarshal(data, &history)
+	}
+
+	// Reverse for newest-first
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+
+	// Build history rows as JSON for client-side rendering
+	histJSON, _ := json.Marshal(history)
+
+	// Build vocab as JSON
+	vocabJSON, _ := json.Marshal(cfg.Replacements)
+
+	// Stats
+	var totalDur, totalServer float64
+	for _, h := range history {
+		totalDur += h.DurationS
+		totalServer += h.ServerMs
+	}
+	n := len(history)
+	avgMs := int64(0)
+	if n > 0 {
+		avgMs = int64(totalServer) / int64(n)
+	}
+	uptime := time.Since(state.startTime)
+
+	fmt.Fprintf(w, dashboardHTML,
+		version,
+		n, int(totalDur/60), avgMs, int(uptime.Hours()), int(uptime.Minutes())%60, state.recentCount,
+		string(histJSON), string(vocabJSON),
+	)
+}
+
+const dashboardHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cognitive Flow</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
+.header{background:#16213e;padding:20px 32px;border-bottom:1px solid #0f3460}
+.header h1{font-size:20px;font-weight:600;color:#fff}
+.header span{font-size:13px;color:#8892b0;margin-left:12px}
+.tabs{display:flex;gap:0;background:#16213e;border-bottom:2px solid #0f3460}
+.tab{padding:12px 28px;cursor:pointer;color:#8892b0;font-size:14px;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}
+.tab:hover{color:#ccd6f6}
+.tab.active{color:#64ffda;border-bottom-color:#64ffda}
+.content{max-width:960px;margin:0 auto;padding:24px 32px}
+.section{display:none}
+.section.active{display:block}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;margin-bottom:28px}
+.card{background:#16213e;border-radius:8px;padding:16px;border:1px solid #1a1a40}
+.card .val{font-size:28px;font-weight:700;color:#64ffda}
+.card .lbl{font-size:12px;color:#8892b0;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+.search{width:100%%;padding:10px 16px;background:#16213e;border:1px solid #1a1a40;border-radius:6px;color:#e0e0e0;font-size:14px;margin-bottom:16px;outline:none}
+.search:focus{border-color:#64ffda}
+table{width:100%%;border-collapse:collapse}
+th{text-align:left;padding:8px 12px;color:#8892b0;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #1a1a40}
+td{padding:10px 12px;border-bottom:1px solid #1a1a40;font-size:13px}
+.hist-row{cursor:pointer;transition:background .1s}
+.hist-row:hover{background:#1a1a40}
+.hist-row .text-cell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:500px}
+.ts{color:#8892b0;white-space:nowrap}
+.ms{color:#8892b0;text-align:right}
+.toast{position:fixed;bottom:24px;right:24px;background:#64ffda;color:#1a1a2e;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:1}
+.vocab-form{display:flex;gap:8px;margin-bottom:16px}
+.vocab-form input{flex:1;padding:8px 12px;background:#16213e;border:1px solid #1a1a40;border-radius:6px;color:#e0e0e0;font-size:13px;outline:none}
+.vocab-form input:focus{border-color:#64ffda}
+.vocab-form button,.del-btn{background:#64ffda;color:#1a1a2e;border:none;padding:8px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
+.vocab-form button:hover{background:#4cd6b0}
+.del-btn{background:#e74c3c;color:#fff;padding:4px 10px;font-size:11px;border-radius:4px}
+.del-btn:hover{background:#c0392b}
+.empty{color:#8892b0;text-align:center;padding:40px;font-size:14px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Cognitive Flow <span>v%s</span></h1>
+</div>
+<div class="tabs">
+  <div class="tab active" data-tab="dashboard">Dashboard</div>
+  <div class="tab" data-tab="history">History</div>
+  <div class="tab" data-tab="vocab">Vocabulary</div>
+</div>
+
+<div class="content">
+  <div class="section active" id="dashboard">
+    <div class="cards">
+      <div class="card"><div class="val">%d</div><div class="lbl">Total Transcriptions</div></div>
+      <div class="card"><div class="val">%d</div><div class="lbl">Minutes Recorded</div></div>
+      <div class="card"><div class="val">%dms</div><div class="lbl">Avg Server Time</div></div>
+      <div class="card"><div class="val">%dh %dm</div><div class="lbl">Uptime</div></div>
+      <div class="card"><div class="val">%d</div><div class="lbl">This Session</div></div>
+    </div>
+    <h3 style="color:#ccd6f6;margin-bottom:12px;font-size:14px">Recent Transcriptions</h3>
+    <table><thead><tr><th>Time</th><th>Text</th><th>Speed</th></tr></thead>
+    <tbody id="dashBody"></tbody>
+    </table>
+  </div>
+
+  <div class="section" id="history">
+    <input class="search" type="text" placeholder="Search transcriptions..." id="histSearch">
+    <table><thead><tr><th>Time</th><th>Text</th><th>Speed</th></tr></thead>
+    <tbody id="histBody"></tbody>
+    </table>
+  </div>
+
+  <div class="section" id="vocab">
+    <p style="color:#8892b0;margin-bottom:16px;font-size:13px">
+      Words the server gets wrong? Add corrections here. These run after every transcription.
+    </p>
+    <div class="vocab-form">
+      <input type="text" id="vocabFrom" placeholder="Wrong word">
+      <input type="text" id="vocabTo" placeholder="Correct word">
+      <button id="vocabAdd">Add</button>
+    </div>
+    <table id="vocabTable">
+      <thead><tr><th>From</th><th>To</th><th></th></tr></thead>
+      <tbody id="vocabBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+var historyData = %s;
+var vocabData = %s;
+
+// Tabs
+document.querySelectorAll('.tab').forEach(function(t){
+  t.onclick=function(){
+    document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active')});
+    document.querySelectorAll('.section').forEach(function(x){x.classList.remove('active')});
+    t.classList.add('active');
+    document.getElementById(t.dataset.tab).classList.add('active');
+  };
+});
+if(location.hash){
+  var el=document.querySelector('.tab[data-tab="'+location.hash.slice(1)+'"]');
+  if(el) el.click();
+}
+
+function toast(msg){
+  var t=document.getElementById('toast');
+  t.textContent=msg;t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show')},1500);
+}
+
+function fmtTime(ts){
+  try{var d=new Date(ts);return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});}
+  catch(e){return ts;}
+}
+
+function buildHistRow(entry){
+  var tr=document.createElement('tr');
+  tr.className='hist-row';
+  var td1=document.createElement('td');td1.className='ts';td1.textContent=fmtTime(entry.timestamp);
+  var td2=document.createElement('td');td2.className='text-cell';td2.textContent=entry.text;
+  var td3=document.createElement('td');td3.className='ms';td3.textContent=entry.total_ms+'ms';
+  tr.appendChild(td1);tr.appendChild(td2);tr.appendChild(td3);
+  tr.onclick=function(){navigator.clipboard.writeText(entry.text);toast('Copied to clipboard');};
+  return tr;
+}
+
+// Render dashboard (last 20)
+var dashBody=document.getElementById('dashBody');
+historyData.slice(0,20).forEach(function(e){dashBody.appendChild(buildHistRow(e));});
+
+// Render full history
+var histBody=document.getElementById('histBody');
+historyData.forEach(function(e){histBody.appendChild(buildHistRow(e));});
+
+// Search
+document.getElementById('histSearch').oninput=function(){
+  var q=this.value.toLowerCase();
+  while(histBody.firstChild) histBody.removeChild(histBody.firstChild);
+  historyData.forEach(function(e){
+    if(e.text.toLowerCase().indexOf(q)!==-1) histBody.appendChild(buildHistRow(e));
+  });
+};
+
+// Vocab rendering
+function renderVocab(data){
+  var body=document.getElementById('vocabBody');
+  while(body.firstChild) body.removeChild(body.firstChild);
+  Object.keys(data).forEach(function(from){
+    var tr=document.createElement('tr');
+    var td1=document.createElement('td');td1.textContent=from;
+    var td2=document.createElement('td');td2.textContent=data[from];
+    var td3=document.createElement('td');
+    var btn=document.createElement('button');btn.className='del-btn';btn.textContent='x';
+    btn.onclick=function(){
+      fetch('/api/vocab/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:from})})
+        .then(function(r){return r.json()}).then(function(d){vocabData=d;renderVocab(d);toast('Removed: '+from);});
+    };
+    td3.appendChild(btn);
+    tr.appendChild(td1);tr.appendChild(td2);tr.appendChild(td3);
+    body.appendChild(tr);
+  });
+}
+renderVocab(vocabData);
+
+document.getElementById('vocabAdd').onclick=function(){
+  var from=document.getElementById('vocabFrom').value.trim();
+  var to=document.getElementById('vocabTo').value.trim();
+  if(!from){toast('Enter a word to replace');return;}
+  fetch('/api/vocab/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:from,to:to})})
+    .then(function(r){return r.json()}).then(function(d){vocabData=d;renderVocab(d);toast('Added: '+from+' -> '+to);});
+  document.getElementById('vocabFrom').value='';
+  document.getElementById('vocabTo').value='';
+};
+</script>
+</body>
+</html>`
 
 // ----- Audio capture loop -----
 // Only reads filled buffers. Device is already open and recording.
@@ -2171,13 +2528,11 @@ var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 				go transcribe(state.lastSamples, false)
 			}
 		case menuOpenLog:
-			p, _ := syscall.UTF16PtrFromString(filepath.Join(configDir(), "cogflow.log"))
-			pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
+			openDashboard("")
+		case menuOpenConfig:
+			openDashboard("#vocab")
 		case menuOpenAudio:
 			p, _ := syscall.UTF16PtrFromString(filepath.Join(configDir(), "audio"))
-			pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
-		case menuOpenConfig:
-			p, _ := syscall.UTF16PtrFromString(filepath.Join(configDir(), "config.json"))
 			pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
 		case menuUpdate:
 			go downloadUpdate()
@@ -2297,10 +2652,10 @@ func showMenu(hwnd uintptr) {
 
 	pAppendMenu.Call(h, mfSeparator, 0, 0)
 
-	// --- Files ---
-	pAppendMenu.Call(h, mfString, menuOpenLog, uintptr(unsafe.Pointer(utf16p("Open Log File"))))
+	// --- Dashboard & Files ---
+	pAppendMenu.Call(h, mfString, menuOpenLog, uintptr(unsafe.Pointer(utf16p("Dashboard"))))
+	pAppendMenu.Call(h, mfString, menuOpenConfig, uintptr(unsafe.Pointer(utf16p("Vocabulary"))))
 	pAppendMenu.Call(h, mfString, menuOpenAudio, uintptr(unsafe.Pointer(utf16p("Open Recordings"))))
-	pAppendMenu.Call(h, mfString, menuOpenConfig, uintptr(unsafe.Pointer(utf16p("Edit Config"))))
 
 	pAppendMenu.Call(h, mfSeparator, 0, 0)
 

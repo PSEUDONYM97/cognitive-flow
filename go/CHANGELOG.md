@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.7.0
+- Web dashboard: local HTTP server on 127.0.0.1 with history browser, stats, vocabulary editor
+- Dashboard tab: stat cards (total transcriptions, minutes recorded, avg server time, uptime, session count)
+- History tab: searchable list of all transcriptions, click any to copy to clipboard
+- Vocabulary tab: add/remove word corrections with live config updates
+- Tray menu: Dashboard and Vocabulary open browser to local dashboard
+
 ## v2.6.0
 - Rich tray menu: Recent transcriptions submenu (click to copy), Open Log/Recordings/Config
 - Stats line in tray: version, transcription count, uptime
