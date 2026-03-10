@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,16 +32,25 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Pin the main goroutine to the OS thread BEFORE main() runs.
+// Without this, Go's scheduler can move the main goroutine between OS threads,
+// which breaks Win32 window message dispatching and causes AppHangB1 kills.
+func init() {
+	runtime.LockOSThread()
+}
+
 // ----- Configuration -----
 
 type config struct {
 	Server       string            `json:"server"`
 	Replacements map[string]string `json:"replacements"`
+	PauseMedia   bool              `json:"pause_media"`
 }
 
 var cfg = config{
 	Server:       "http://192.168.0.10:9200",
 	Replacements: map[string]string{},
+	PauseMedia:   true, // default on, matches Python behavior
 }
 
 func loadConfig() {
@@ -58,6 +69,12 @@ func loadConfig() {
 	if cfg.Replacements == nil {
 		cfg.Replacements = map[string]string{}
 	}
+}
+
+func saveConfig() {
+	path := filepath.Join(configDir(), "config.json")
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(path, data, 0644)
 }
 
 func configDir() string {
@@ -116,6 +133,7 @@ var (
 	pCreateIconIndirect  = user32.NewProc("CreateIconIndirect")
 	pDestroyIcon         = user32.NewProc("DestroyIcon")
 
+	pPostThreadMessage     = user32.NewProc("PostThreadMessageW")
 	pGetCurrentThreadId    = kernel32.NewProc("GetCurrentThreadId")
 	pGlobalAlloc           = kernel32.NewProc("GlobalAlloc")
 	pGlobalLock            = kernel32.NewProc("GlobalLock")
@@ -143,12 +161,15 @@ var (
 	pUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
 
 	pShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
+	pSetCapture      = user32.NewProc("SetCapture")
+	pReleaseCapture  = user32.NewProc("ReleaseCapture")
+	pGetWindowRect   = user32.NewProc("GetWindowRect")
 )
 
 // ----- Constants -----
 
 const (
-	version = "2.1.0"
+	version = "2.3.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -313,6 +334,7 @@ const (
 
 var phase atomic.Int32
 var audioLevel atomic.Int32 // RMS level 0-100, updated by capture loop
+var mainThreadID uintptr     // for PostThreadMessage from other threads
 
 func currentPhase() int32  { return phase.Load() }
 func setPhaseVal(p int32)  { phase.Store(p) }
@@ -325,6 +347,7 @@ var state struct {
 	clipboardMode bool
 	enabled       bool
 	running       bool
+	indVisible    bool
 	lastEsc       time.Time
 	lastWake      time.Time
 
@@ -356,13 +379,18 @@ func main() {
 	setPhaseVal(phaseIdle)
 	state.lastWake = time.Now()
 
+	// Save main thread ID so other threads can post WM_QUIT to us
+	mainThreadID, _, _ = pGetCurrentThreadId.Call()
+
 	log("Cognitive Flow v%s", version)
 	log("Server: %s", cfg.Server)
 
 	// Clean shutdown on console close (Ctrl+C, window close, etc.)
+	// Console handler runs on a DIFFERENT thread - PostQuitMessage would
+	// post to that thread's queue. Use PostThreadMessage to reach main.
 	pSetConsoleCtrlHandler.Call(syscall.NewCallback(func(sig uintptr) uintptr {
 		shutdown()
-		pPostQuitMessage.Call(0) // break the message loop
+		pPostThreadMessage.Call(mainThreadID, 0x0012, 0, 0) // WM_QUIT=0x0012
 		return 1
 	}), 1)
 
@@ -474,6 +502,108 @@ func keyDown(vk uintptr) bool {
 	return int16(r)&(-32768) != 0
 }
 
+// ----- Media control -----
+// Pauses media playback during recording so mic doesn't pick up audio.
+// Checks if audio is actually playing via WASAPI peak meter before pausing.
+// Only resumes if WE caused the pause.
+
+const vkMediaPlayPause = 0xB3
+
+var (
+	mediaPaused bool // true if WE sent a pause
+	ole32       = windows.NewLazySystemDLL("ole32.dll")
+	pCoInit     = ole32.NewProc("CoInitializeEx")
+	pCoCreateInst = ole32.NewProc("CoCreateInstance")
+)
+
+// WASAPI COM GUIDs
+var (
+	clsidMMDevEnum = [16]byte{0x95, 0x03, 0xDE, 0xBC, 0x2F, 0xE5, 0x7C, 0x46, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}
+	iidIMMDevEnum  = [16]byte{0x79, 0xFB, 0x1D, 0xA4, 0x05, 0x47, 0xDA, 0x44, 0x95, 0x8A, 0x61, 0x2F, 0x72, 0x46, 0xBE, 0x85}
+	iidAudioMeter  = [16]byte{0xF6, 0x16, 0x22, 0xC0, 0x67, 0x8C, 0x5B, 0x4B, 0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64}
+)
+
+// isAudioPlaying checks if any audio is being output via the default render device.
+// Uses IAudioMeterInformation::GetPeakValue - if peak > 0, something is playing.
+func isAudioPlaying() bool {
+	// Initialize COM on this goroutine
+	pCoInit.Call(0, 0) // COINIT_MULTITHREADED
+
+	// Create MMDeviceEnumerator
+	var enumPtr uintptr
+	hr, _, _ := pCoCreateInst.Call(
+		uintptr(unsafe.Pointer(&clsidMMDevEnum)),
+		0,
+		1|4, // CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER
+		uintptr(unsafe.Pointer(&iidIMMDevEnum)),
+		uintptr(unsafe.Pointer(&enumPtr)),
+	)
+	if hr != 0 || enumPtr == 0 {
+		return false // can't check, assume not playing
+	}
+	defer comRelease(enumPtr)
+
+	// GetDefaultAudioEndpoint(eRender=0, eConsole=0, &device)
+	vtbl := *(*[8]uintptr)(unsafe.Pointer(*(*uintptr)(unsafe.Pointer(enumPtr))))
+	var devicePtr uintptr
+	hr, _, _ = syscall.SyscallN(vtbl[4], enumPtr, 0, 0, uintptr(unsafe.Pointer(&devicePtr)))
+	if hr != 0 || devicePtr == 0 {
+		return false
+	}
+	defer comRelease(devicePtr)
+
+	// Activate IAudioMeterInformation
+	vtbl2 := *(*[6]uintptr)(unsafe.Pointer(*(*uintptr)(unsafe.Pointer(devicePtr))))
+	var meterPtr uintptr
+	hr, _, _ = syscall.SyscallN(vtbl2[3], devicePtr,
+		uintptr(unsafe.Pointer(&iidAudioMeter)),
+		7, // CLSCTX_ALL
+		0,
+		uintptr(unsafe.Pointer(&meterPtr)),
+	)
+	if hr != 0 || meterPtr == 0 {
+		return false
+	}
+	defer comRelease(meterPtr)
+
+	// GetPeakValue(&peak)
+	vtbl3 := *(*[4]uintptr)(unsafe.Pointer(*(*uintptr)(unsafe.Pointer(meterPtr))))
+	var peak float32
+	hr, _, _ = syscall.SyscallN(vtbl3[3], meterPtr, uintptr(unsafe.Pointer(&peak)))
+	if hr != 0 {
+		return false
+	}
+
+	return peak > 0.001
+}
+
+func comRelease(ptr uintptr) {
+	vtbl := *(*[3]uintptr)(unsafe.Pointer(*(*uintptr)(unsafe.Pointer(ptr))))
+	syscall.SyscallN(vtbl[2], ptr) // IUnknown::Release
+}
+
+func pauseMedia() {
+	if !cfg.PauseMedia {
+		return
+	}
+	if !isAudioPlaying() {
+		log("No audio playing, skipping pause")
+		return
+	}
+	sendKey(vkMediaPlayPause, keyeventfExtended)
+	mediaPaused = true
+	log("Media paused")
+}
+
+func resumeMedia() {
+	if !mediaPaused {
+		return
+	}
+	mediaPaused = false
+	sendKey(vkMediaPlayPause, keyeventfExtended)
+	log("Media resumed")
+}
+
 // ----- Recording flow -----
 
 func toggle(clipboard bool) {
@@ -503,6 +633,7 @@ func cancel() {
 		close(audio.stopCh)
 		audio.stopCh = nil
 	}
+	resumeMedia()
 	setPhase(phaseIdle)
 }
 
@@ -521,6 +652,9 @@ func startRecording() {
 	log("Recording (clipboard: %v)", state.clipboardMode)
 	state.recording = true
 	setPhase(phaseRecording)
+
+	// Pause media so mic doesn't pick up playback
+	pauseMedia()
 
 	// Warm server while user speaks
 	go healthCheck()
@@ -542,6 +676,7 @@ func startRecording() {
 	if ret != 0 {
 		log("waveInOpen failed: MMRESULT %d", ret)
 		state.recording = false
+		resumeMedia()
 		setPhase(phaseIdle)
 		return
 	}
@@ -564,6 +699,7 @@ func startRecording() {
 
 	// Goroutine to receive frames when recording stops
 	go func() {
+		defer resumeMedia() // always unpause media when pipeline finishes
 		defer func() {
 			if r := recover(); r != nil {
 				log("PANIC in transcription pipeline: %v", r)
@@ -764,18 +900,30 @@ func transcribe(samples []int16, clipboard bool) {
 		return
 	}
 
-	text := strings.TrimSpace(result.Text)
-	if text == "" {
+	raw := strings.TrimSpace(result.Text)
+	if raw == "" {
 		log("Empty transcription")
 		setPhase(phaseIdle)
 		return
 	}
 
-	// Word replacements from config
-	text = applyReplacements(text)
+	// Full text processing pipeline (6 passes)
+	text := processText(raw)
+	if text == "" {
+		log("Empty after processing (raw: %s)", raw)
+		setPhase(phaseIdle)
+		return
+	}
 
 	elapsed := time.Since(start)
+	dur := float64(len(samples)) / sampleRate
 	log("%dms (server: %.0fms) | %s", elapsed.Milliseconds(), result.Ms, text)
+	if raw != text {
+		log("  raw: %s", raw)
+	}
+
+	// Save to history
+	saveHistory(text, dur, result.Ms, elapsed.Milliseconds())
 
 	// Output
 	if clipboard {
@@ -826,13 +974,165 @@ func encodeWAV(samples []int16) []byte {
 	return b.Bytes()
 }
 
+// ----- Text processing pipeline -----
+// Six-pass pipeline ported from the Python version. Order matters.
+//   0. Hallucination loop detection (10+ word repeats)
+//   1. Filler word removal (um, uh, er, etc.)
+//   2. Whisper artifact correction (,nd -> command, etc.)
+//   3. Character normalization (smart quotes -> ASCII)
+//   4. Custom word replacements (user-configurable)
+//   5. Spoken punctuation conversion (period -> .)
+//   6. Spacing cleanup
+
+var fillerWords = map[string]bool{
+	"um": true, "uh": true, "uhh": true, "umm": true, "ummm": true, "uhhh": true,
+	"er": true, "err": true, "errr": true, "ah": true, "ahh": true, "ahhh": true,
+	"hmm": true, "hmmm": true, "hmmmm": true, "mm": true, "mmm": true, "mmmm": true,
+}
+
+// Go's regexp (RE2) doesn't support backreferences, so hallucination
+// detection is done programmatically in removeHallucinations().
+
+var whisperCorrections = []struct{ re *regexp.Regexp; repl string }{
+	{regexp.MustCompile(`(?i),nd\b`), " command"},
+	{regexp.MustCompile(`(?i),nds\b`), " commands"},
+	{regexp.MustCompile(`(?i),nding\b`), " commanding"},
+	{regexp.MustCompile(`(?i),nt\b`), " comment"},
+	{regexp.MustCompile(`(?i),nts\b`), " comments"},
+	{regexp.MustCompile(`(?i),n\b`), " common"},
+	{regexp.MustCompile(`(?i),nly\b`), " commonly"},
+	{regexp.MustCompile(`(?i)\.riod\b`), " period"},
+	{regexp.MustCompile(`(?i):lon\b`), " colon"},
+	{regexp.MustCompile(`(?i);micolon\b`), " semicolon"},
+	{regexp.MustCompile(`(?i)\?estion\b`), " question"},
+	{regexp.MustCompile(`(?i)!xclamation\b`), " exclamation"},
+	{regexp.MustCompile(`(?i)\bkama\b`), "comma"},
+}
+
+var charNormalize = []struct{ from, to string }{
+	{"\u2019", "'"}, // right single quote
+	{"\u2018", "'"}, // left single quote
+	{"\u201C", `"`}, // left double quote
+	{"\u201D", `"`}, // right double quote
+	{"\u2013", "-"}, // en dash
+	{"\u2014", "-"}, // em dash
+	{"\u2026", "..."}, // ellipsis
+}
+
+var spokenPunctuation = []struct{ re *regexp.Regexp; repl string }{
+	{regexp.MustCompile(`(?i)\bnew paragraph\b`), "\n\n"},
+	{regexp.MustCompile(`(?i)\bnew line\b`), "\n"},
+	{regexp.MustCompile(`(?i)\bnewline\b`), "\n"},
+	{regexp.MustCompile(`(?i)\benter\b`), "\n"},
+	{regexp.MustCompile(`(?i)\bfull stop\b`), "."},
+	{regexp.MustCompile(`(?i)\bquestion mark\b`), "?"},
+	{regexp.MustCompile(`(?i)\bexclamation mark\b`), "!"},
+	{regexp.MustCompile(`(?i)\bexclamation point\b`), "!"},
+	{regexp.MustCompile(`(?i)\bsemi colon\b`), ";"},
+	{regexp.MustCompile(`(?i)\bsemicolon\b`), ";"},
+	{regexp.MustCompile(`(?i)\bopen parenthesis\b`), "("},
+	{regexp.MustCompile(`(?i)\bclose parenthesis\b`), ")"},
+	{regexp.MustCompile(`(?i)\bopen bracket\b`), "["},
+	{regexp.MustCompile(`(?i)\bclose bracket\b`), "]"},
+	{regexp.MustCompile(`(?i)\bopen brace\b`), "{"},
+	{regexp.MustCompile(`(?i)\bclose brace\b`), "}"},
+	{regexp.MustCompile(`(?i)\bopen quote\b`), `"`},
+	{regexp.MustCompile(`(?i)\bclose quote\b`), `"`},
+	{regexp.MustCompile(`(?i)\bellipsis\b`), "..."},
+	{regexp.MustCompile(`(?i)\bperiod\b`), "."},
+	{regexp.MustCompile(`(?i)\bcomma\b`), ","},
+	{regexp.MustCompile(`(?i)\bcolon\b`), ":"},
+	{regexp.MustCompile(`(?i)\bdash\b`), "-"},
+	{regexp.MustCompile(`(?i)\bhyphen\b`), "-"},
+	{regexp.MustCompile(`(?i)\bapostrophe\b`), "'"},
+	{regexp.MustCompile(`(?i)\bquote\b`), `"`},
+}
+
+var (
+	reSpacePunct   = regexp.MustCompile(`\s+([.,!?;:])`)
+	reMultiSpace   = regexp.MustCompile(`\s+`)
+	reTrailPunct   = regexp.MustCompile(`[.,!?;:'"]+$`)
+)
+
+// removeHallucinations collapses 10+ consecutive identical words down to one.
+// e.g. "I'm I'm I'm I'm I'm I'm I'm I'm I'm I'm whatever" -> "I'm whatever"
+func removeHallucinations(text string) string {
+	words := strings.Fields(text)
+	if len(words) < 10 {
+		return text
+	}
+
+	var out []string
+	i := 0
+	for i < len(words) {
+		w := strings.ToLower(words[i])
+		// Count consecutive identical words (case-insensitive)
+		j := i + 1
+		for j < len(words) && strings.ToLower(words[j]) == w {
+			j++
+		}
+		count := j - i
+		if count >= 10 {
+			// Hallucination: keep only one instance
+			out = append(out, words[i])
+			log("Hallucination: '%s' repeated %d times", words[i], count)
+		} else {
+			out = append(out, words[i:j]...)
+		}
+		i = j
+	}
+	return strings.Join(out, " ")
+}
+
+func processText(raw string) string {
+	text := raw
+
+	// Pass 0: Hallucination loop detection (10+ consecutive word repeats)
+	text = removeHallucinations(text)
+
+	// Pass 1: Filler word removal
+	words := strings.Fields(text)
+	kept := words[:0]
+	for _, w := range words {
+		clean := reTrailPunct.ReplaceAllString(w, "")
+		if !fillerWords[strings.ToLower(clean)] {
+			kept = append(kept, w)
+		}
+	}
+	text = strings.Join(kept, " ")
+
+	// Pass 2: Whisper artifact correction
+	for _, c := range whisperCorrections {
+		text = c.re.ReplaceAllString(text, c.repl)
+	}
+
+	// Pass 3: Character normalization
+	for _, n := range charNormalize {
+		text = strings.ReplaceAll(text, n.from, n.to)
+	}
+
+	// Pass 4: Custom word replacements
+	text = applyReplacements(text)
+
+	// Pass 5: Spoken punctuation conversion
+	for _, p := range spokenPunctuation {
+		text = p.re.ReplaceAllString(text, p.repl)
+	}
+
+	// Pass 6: Spacing cleanup
+	text = reSpacePunct.ReplaceAllString(text, "$1")
+	text = reMultiSpace.ReplaceAllString(text, " ")
+	text = strings.TrimSpace(text)
+
+	return text
+}
+
 func applyReplacements(text string) string {
 	if len(cfg.Replacements) == 0 {
 		return text
 	}
 	words := strings.Fields(text)
 	for i, w := range words {
-		// Separate trailing punctuation: "hello," -> "hello" + ","
 		clean := strings.TrimRightFunc(w, unicode.IsPunct)
 		suffix := w[len(clean):]
 		if repl, ok := cfg.Replacements[strings.ToLower(clean)]; ok {
@@ -840,6 +1140,42 @@ func applyReplacements(text string) string {
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// ----- History tracking -----
+
+type historyEntry struct {
+	Timestamp string  `json:"timestamp"`
+	Text      string  `json:"text"`
+	DurationS float64 `json:"duration_s"`
+	ServerMs  float64 `json:"server_ms"`
+	TotalMs   int64   `json:"total_ms"`
+}
+
+func saveHistory(text string, durS float64, serverMs float64, totalMs int64) {
+	path := filepath.Join(configDir(), "history.json")
+
+	var history []historyEntry
+	if data, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(data, &history)
+	}
+
+	history = append(history, historyEntry{
+		Timestamp: time.Now().Format(time.RFC3339),
+		Text:      text,
+		DurationS: durS,
+		ServerMs:  serverMs,
+		TotalMs:   totalMs,
+	})
+
+	// Keep last 500 entries
+	if len(history) > 500 {
+		history = history[len(history)-500:]
+	}
+
+	if data, err := json.MarshalIndent(history, "", "  "); err == nil {
+		os.WriteFile(path, data, 0644)
+	}
 }
 
 // ----- Text output via SendInput -----
@@ -1058,6 +1394,7 @@ var ind struct {
 	memDC   uintptr
 	dib     uintptr
 	pixels  []byte // BGRA premultiplied, top-down
+	dist    [indSize * indSize]float64 // precomputed distance from center
 	frame   int
 	dragX   int16  // mouse-down position for click vs drag
 	dragY   int16
@@ -1079,8 +1416,6 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 		ind.dragX = int16(lp & 0xFFFF)
 		ind.dragY = int16(lp >> 16 & 0xFFFF)
 		ind.dragging = false
-		// Capture mouse for drag tracking
-		pSetCapture := user32.NewProc("SetCapture")
 		pSetCapture.Call(hwnd)
 		return 0
 
@@ -1092,9 +1427,7 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 				ind.dragging = true
 			}
 			if ind.dragging {
-				// Move window by delta
 				var rc [4]int32
-				pGetWindowRect := user32.NewProc("GetWindowRect")
 				pGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
 				nx := rc[0] + int32(dx)
 				ny := rc[1] + int32(dy)
@@ -1104,7 +1437,6 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 		return 0
 
 	case wmLButtonUp:
-		pReleaseCapture := user32.NewProc("ReleaseCapture")
 		pReleaseCapture.Call()
 		if !ind.dragging {
 			// Click: toggle clipboard recording
@@ -1174,17 +1506,28 @@ func createIndicator() {
 
 	ind.pixels = unsafe.Slice((*byte)(unsafe.Pointer(bits)), indSize*indSize*4)
 
+	initDistTable()
 	renderIndicator()
 	pShowWindow.Call(hwnd, 8) // SW_SHOWNA
+	state.indVisible = true
 
 	// Slow heartbeat timer when idle (redraws on state changes via applyPhase)
 	pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
 }
 
+func initDistTable() {
+	cx, cy := float64(indSize)/2, float64(indSize)/2
+	for y := 0; y < indSize; y++ {
+		for x := 0; x < indSize; x++ {
+			dx, dy := float64(x)-cx+0.5, float64(y)-cy+0.5
+			ind.dist[y*indSize+x] = math.Sqrt(dx*dx + dy*dy)
+		}
+	}
+}
+
 func renderIndicator() {
 	w := indSize
 	px := ind.pixels
-	cx, cy := float64(w)/2, float64(w)/2
 
 	// Clear to fully transparent
 	for i := range px {
@@ -1207,13 +1550,11 @@ func renderIndicator() {
 		level := float64(audioLevel.Load()) / 100.0
 		glowR = indGlowMin + level*(indGlowMax-indGlowMin)
 		glowAlpha = 0.25 + level*0.35
-		// Pulse: opacity oscillates 0.6 - 1.0 over ~900ms at 30fps
 		pulse = 0.65 + 0.35*math.Sin(float64(ind.frame)*0.21)
 	case p == phaseProcessing:
 		col = colAmber
 		glowR = indGlowMin + 2
 		glowAlpha = 0.3
-		// Slow throb for processing
 		pulse = 0.8 + 0.2*math.Sin(float64(ind.frame)*0.12)
 	default:
 		col = colGreen
@@ -1221,69 +1562,50 @@ func renderIndicator() {
 		glowAlpha = 0.2
 	}
 
-	// Draw glow (radial gradient, premultiplied alpha)
-	for y := 0; y < w; y++ {
-		for x := 0; x < w; x++ {
-			dx, dy := float64(x)-cx+0.5, float64(y)-cy+0.5
-			dist := math.Sqrt(dx*dx + dy*dy)
-			if dist < glowR && dist > indDotRadius-0.5 {
-				// Smooth falloff from dot edge to glow edge
-				t := (dist - indDotRadius) / (glowR - indDotRadius)
-				if t < 0 {
-					t = 0
-				}
-				a := (1 - t*t) * glowAlpha * pulse // quadratic falloff
-				if a > 0.004 {
-					i := (y*w + x) * 4
-					// Premultiplied BGRA
-					px[i+0] = byte(col.b * a)
-					px[i+1] = byte(col.g * a)
-					px[i+2] = byte(col.r * a)
-					px[i+3] = byte(255 * a)
-				}
-			}
-		}
-	}
+	// Single pass using precomputed distance table. Zero sqrt calls.
+	// Dot and glow share the same color, so alpha compositing simplifies to
+	// just combining the two alpha values: oA = dotA + glowA*(1-dotA).
+	dotInner := indDotRadius - 0.5
+	dotOuter := indDotRadius + 0.5
 
-	// Draw dot (anti-aliased filled circle, composited over glow)
-	for y := 0; y < w; y++ {
-		for x := 0; x < w; x++ {
-			dx, dy := float64(x)-cx+0.5, float64(y)-cy+0.5
-			dist := math.Sqrt(dx*dx + dy*dy)
-			if dist < indDotRadius+0.5 {
-				cov := 1.0 // coverage for anti-aliasing
-				if dist > indDotRadius-0.5 {
-					cov = 1.0 - (dist - (indDotRadius - 0.5))
-				}
-				cov *= pulse
-				if cov > 0.004 {
-					i := (y*w + x) * 4
-					// Source: premultiplied dot color
-					sB := col.b / 255 * cov
-					sG := col.g / 255 * cov
-					sR := col.r / 255 * cov
-					sA := cov
-					// Dest: existing glow
-					dB := float64(px[i+0]) / 255
-					dG := float64(px[i+1]) / 255
-					dR := float64(px[i+2]) / 255
-					dA := float64(px[i+3]) / 255
-					// Porter-Duff src-over
-					invA := 1 - sA
-					oA := sA + dA*invA
-					px[i+0] = byte((sB + dB*invA) * 255)
-					px[i+1] = byte((sG + dG*invA) * 255)
-					px[i+2] = byte((sR + dR*invA) * 255)
-					px[i+3] = byte(oA * 255)
-				}
+	for idx := 0; idx < w*w; idx++ {
+		dist := ind.dist[idx]
+		if dist >= glowR {
+			continue
+		}
+
+		var a float64
+
+		if dist < dotInner {
+			// Fully inside dot
+			a = pulse
+		} else if dist < dotOuter {
+			// AA edge of dot, composite with underlying glow
+			dotA := pulse * (1.0 - (dist - dotInner))
+			glowT := (dist - indDotRadius) / (glowR - indDotRadius)
+			if glowT < 0 {
+				glowT = 0
 			}
+			glowA := (1 - glowT*glowT) * glowAlpha * pulse
+			a = dotA + glowA*(1-dotA) // src-over (same color = trivial)
+		} else {
+			// Pure glow
+			t := (dist - indDotRadius) / (glowR - indDotRadius)
+			a = (1 - t*t) * glowAlpha * pulse
+		}
+
+		if a > 0.004 {
+			i := idx * 4
+			px[i+0] = byte(col.b * a)
+			px[i+1] = byte(col.g * a)
+			px[i+2] = byte(col.r * a)
+			px[i+3] = byte(255 * a)
 		}
 	}
 
 	// Push to screen via UpdateLayeredWindow
 	srcPt := [2]int32{0, 0}
 	sz := [2]int32{int32(w), int32(w)}
-	// BLENDFUNCTION packed as uint32: BlendOp=0, BlendFlags=0, Alpha=255, AlphaFormat=1 (AC_SRC_ALPHA)
 	blend := uint32(0) | uint32(0)<<8 | uint32(255)<<16 | uint32(1)<<24
 	pUpdateLayeredWindow.Call(
 		ind.hwnd, 0, 0, uintptr(unsafe.Pointer(&sz)),
@@ -1313,8 +1635,8 @@ func applyPhase(p int32) {
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
 		pSetTimer.Call(state.bar, timerRepaint, 200, 0)
-		// 33ms indicator animation (30fps) during recording
-		pSetTimer.Call(ind.hwnd, timerIndAnim, 33, 0)
+		// 66ms indicator animation (15fps) during recording
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	case phaseProcessing:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
@@ -1327,20 +1649,25 @@ func applyPhase(p int32) {
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
-		// Back to slow heartbeat when idle
+		// Back to slow heartbeat when idle.
+		// Don't call renderIndicator() - it's cross-window GDI from bar's wndproc.
+		// The timer will pick it up within 1s.
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 1000, 0)
-		renderIndicator() // immediate update to idle state
 	}
 
 	updateTrayIcon()
-	renderIndicator()
+	// Don't call renderIndicator() here - let the timer handle it.
+	// Cross-window GDI from a wndproc can stall the message pump.
 }
 
 // ----- System tray -----
 
 const (
-	menuToggle = 1
-	menuQuit   = 2
+	menuToggle     = 1
+	menuQuit       = 2
+	menuPauseMedia = 3
+	menuShowHide   = 4
+	menuResetPos   = 5
 )
 
 var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
@@ -1359,6 +1686,22 @@ var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 				s = "disabled"
 			}
 			log("Hotkey %s via menu", s)
+		case menuPauseMedia:
+			cfg.PauseMedia = !cfg.PauseMedia
+			s := "on"
+			if !cfg.PauseMedia {
+				s = "off"
+			}
+			log("Pause media: %s", s)
+			saveConfig()
+		case menuShowHide:
+			if state.indVisible {
+				pShowWindow.Call(ind.hwnd, 0) // SW_HIDE
+				state.indVisible = false
+			} else {
+				pShowWindow.Call(ind.hwnd, 8) // SW_SHOWNA
+				state.indVisible = true
+			}
 		case menuQuit:
 			shutdown()
 			pPostQuitMessage.Call(0)
@@ -1401,11 +1744,29 @@ func createTray() {
 func showMenu(hwnd uintptr) {
 	h, _, _ := pCreatePopupMenu.Call()
 
+	// Hotkey toggle
 	flags := uintptr(mfString)
 	if state.enabled {
 		flags |= mfChecked
 	}
 	pAppendMenu.Call(h, flags, menuToggle, uintptr(unsafe.Pointer(utf16p("Hotkey Enabled"))))
+
+	// Pause media toggle
+	flags = uintptr(mfString)
+	if cfg.PauseMedia {
+		flags |= mfChecked
+	}
+	pAppendMenu.Call(h, flags, menuPauseMedia, uintptr(unsafe.Pointer(utf16p("Pause Media"))))
+
+	pAppendMenu.Call(h, mfSeparator, 0, 0)
+
+	// Overlay controls
+	label := "Hide Indicator"
+	if !state.indVisible {
+		label = "Show Indicator"
+	}
+	pAppendMenu.Call(h, mfString, menuShowHide, uintptr(unsafe.Pointer(utf16p(label))))
+
 	pAppendMenu.Call(h, mfSeparator, 0, 0)
 	pAppendMenu.Call(h, mfString, menuQuit, uintptr(unsafe.Pointer(utf16p("Quit"))))
 
