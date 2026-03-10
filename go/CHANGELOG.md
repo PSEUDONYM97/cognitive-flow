@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.0
+- Collapsible indicator: fades to subtle dot after 3s idle, expands on hover or activity
+- Smooth fade transitions (slow fade out, quick fade in)
+- Mouse hover tracking via TrackMouseEvent/WM_MOUSELEAVE
+
 ## v2.4.2
 - Retry Last Recording in tray menu (re-sends last audio to server)
 - Copy Last Output in tray menu

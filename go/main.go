@@ -165,14 +165,15 @@ var (
 	pUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
 
 	pShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
-	pSetCapture      = user32.NewProc("SetCapture")
-	pReleaseCapture  = user32.NewProc("ReleaseCapture")
+	pSetCapture        = user32.NewProc("SetCapture")
+	pReleaseCapture    = user32.NewProc("ReleaseCapture")
+	pTrackMouseEvent   = user32.NewProc("TrackMouseEvent")
 )
 
 // ----- Constants -----
 
 const (
-	version = "2.4.2"
+	version = "2.5.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -1660,7 +1661,12 @@ var ind struct {
 	frame   int
 	dragX   int16  // mouse-down position for click vs drag
 	dragY   int16
-	dragging bool
+	dragging  bool
+	collapsed bool      // true after 3s idle - subtle dot, no glow
+	hovered   bool      // mouse is over the indicator
+	tracking  bool      // TrackMouseEvent registered
+	collapseAt time.Time // when to collapse (zero = don't)
+	fadeLevel  float64   // 0.0 = collapsed, 1.0 = expanded (smooth transition)
 }
 
 type indColor struct{ r, g, b float64 }
@@ -1682,6 +1688,23 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 		return 0
 
 	case wmMouseMove:
+		// Register for WM_MOUSELEAVE if not already tracking
+		if !ind.tracking {
+			tme := [4]uintptr{
+				unsafe.Sizeof([4]uintptr{}), // cbSize
+				0x00000002,                  // TME_LEAVE
+				hwnd,                        // hwndTrack
+				0,                           // dwHoverTime (unused)
+			}
+			pTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+			ind.tracking = true
+		}
+		if !ind.hovered {
+			ind.hovered = true
+			// Speed up timer for smooth fade-in animation (idle runs at 1000ms, too slow)
+			pSetTimer.Call(hwnd, timerIndAnim, 66, 0)
+		}
+
 		if wp&0x0001 != 0 { // MK_LBUTTON
 			mx, my := int16(lp&0xFFFF), int16(lp>>16&0xFFFF)
 			dx, dy := mx-ind.dragX, my-ind.dragY
@@ -1696,6 +1719,12 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 				pSetWindowPos.Call(hwnd, 0, uintptr(nx), uintptr(ny), 0, 0, 0x0001|0x0004|0x0010)
 			}
 		}
+		return 0
+
+	case 0x02A3: // WM_MOUSELEAVE
+		ind.hovered = false
+		ind.tracking = false
+		// Keep fast timer briefly for fade-out, then applyPhase will reset to 1000ms on idle
 		return 0
 
 	case wmLButtonUp:
@@ -1715,6 +1744,40 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 
 	case wmTimer:
 		if wp == timerIndAnim {
+			// Collapse after 3s idle
+			p := currentPhase()
+			if p == phaseIdle && !ind.collapseAt.IsZero() && time.Now().After(ind.collapseAt) {
+				ind.collapsed = true
+				ind.collapseAt = time.Time{} // clear
+				// Speed up timer for smooth fade-out animation
+				pSetTimer.Call(hwnd, timerIndAnim, 66, 0)
+			}
+
+			// Smooth fade: target 1.0 when expanded/hovered, 0.0 when collapsed
+			target := 0.0
+			if !ind.collapsed || ind.hovered || p != phaseIdle {
+				target = 1.0
+			}
+			animating := false
+			if ind.fadeLevel < target {
+				ind.fadeLevel += 0.08 // ~12 frames to full
+				if ind.fadeLevel > 1.0 {
+					ind.fadeLevel = 1.0
+				}
+				animating = ind.fadeLevel < target
+			} else if ind.fadeLevel > target {
+				ind.fadeLevel -= 0.04 // ~25 frames to collapse (slower fade out)
+				if ind.fadeLevel < 0.0 {
+					ind.fadeLevel = 0.0
+				}
+				animating = ind.fadeLevel > target
+			}
+
+			// Slow timer back to 1s when done animating and idle
+			if !animating && p == phaseIdle && !ind.hovered {
+				pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
+			}
+
 			renderIndicator()
 		}
 		return 0
@@ -1774,6 +1837,8 @@ func createIndicator() {
 	ind.pixels = unsafe.Slice((*byte)(unsafe.Pointer(bits)), indSize*indSize*4)
 
 	initDistTable()
+	ind.fadeLevel = 1.0
+	ind.collapseAt = time.Now().Add(3 * time.Second) // collapse 3s after startup
 	renderIndicator()
 	pShowWindow.Call(hwnd, 8) // SW_SHOWNA
 	state.indVisible = true
@@ -1909,6 +1974,19 @@ func renderIndicator() {
 		glowAlpha = 0.2
 	}
 
+	// Collapse fade: modulate glow and dot opacity when idle
+	// fadeLevel 1.0 = full presence, 0.0 = subtle dot only
+	fl := ind.fadeLevel
+	if fl < 1.0 && p == phaseIdle {
+		// Shrink glow radius and reduce alpha as we fade out
+		minGlow := indDotRadius + 1.5 // barely visible halo
+		glowR = minGlow + fl*(glowR-minGlow)
+		glowAlpha *= 0.15 + 0.85*fl
+		// Keep dot center pulse at minimum 0.35 so the window stays hittable
+		// (UpdateLayeredWindow hit-tests on pixel alpha - zero alpha = click-through)
+		pulse *= 0.35 + 0.65*fl
+	}
+
 	// Single pass using precomputed distance table. Zero sqrt calls.
 	// Dot and glow share the same color, so alpha compositing simplifies to
 	// just combining the two alpha values: oA = dotA + glowA*(1-dotA).
@@ -1978,6 +2056,9 @@ func applyPhase(p int32) {
 	case phaseRecording:
 		audioLevel.Store(0)
 		ind.frame = 0
+		ind.collapsed = false
+		ind.collapseAt = time.Time{}
+		ind.fadeLevel = 1.0
 		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
@@ -1987,6 +2068,9 @@ func applyPhase(p int32) {
 	case phaseProcessing:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
+		ind.collapsed = false
+		ind.collapseAt = time.Time{}
+		ind.fadeLevel = 1.0
 		pShowWindow.Call(state.bar, 8)
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
@@ -1995,6 +2079,8 @@ func applyPhase(p int32) {
 	default:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
+		// Start 3s collapse countdown
+		ind.collapseAt = time.Now().Add(3 * time.Second)
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
 		// Back to slow heartbeat when idle.
 		// Don't call renderIndicator() - it's cross-window GDI from bar's wndproc.
