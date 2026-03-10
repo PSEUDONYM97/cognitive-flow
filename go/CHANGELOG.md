@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.5.1
+- Fix indicator vanishing: DWM silently drops layered windows from composition
+- Periodic topmost re-assertion every ~10s (SetWindowPos)
+- Full compositor recovery every 30s: show + topmost + 1px nudge to force DWM re-register
+- Rebuild GDI resources on wake (stale DC from display adapter reset)
+- Higher collapsed dot floor (60% opacity, always visible and hittable)
+- Faster hover fade-in (~4 frames / 250ms)
+
 ## v2.5.0
 - Collapsible indicator: fades to subtle dot after 3s idle, expands on hover or activity
 - Smooth fade transitions (slow fade out, quick fade in)

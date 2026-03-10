@@ -173,7 +173,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.5.0"
+	version = "2.5.1"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -1760,7 +1760,7 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			}
 			animating := false
 			if ind.fadeLevel < target {
-				ind.fadeLevel += 0.08 // ~12 frames to full
+				ind.fadeLevel += 0.25 // ~4 frames to full
 				if ind.fadeLevel > 1.0 {
 					ind.fadeLevel = 1.0
 				}
@@ -1776,6 +1776,12 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			// Slow timer back to 1s when done animating and idle
 			if !animating && p == phaseIdle && !ind.hovered {
 				pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
+			}
+
+			// Light topmost re-assertion every ~10 frames (10s at 1s/tick idle)
+			// DWM silently drops layered windows from composition
+			if ind.frame%10 == 0 && state.indVisible {
+				pSetWindowPos.Call(hwnd, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
 			}
 
 			renderIndicator()
@@ -1886,8 +1892,11 @@ func rebuildIndicatorGDI() {
 	pSetWindowPos.Call(ind.hwnd, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
 }
 
-// recoverIndicator checks if the indicator window got hidden by sleep/compositor
-// and forces it back to visible + topmost. Called from the bar's heartbeat timer.
+// recoverIndicator unconditionally re-asserts the indicator window every heartbeat.
+// DWM can silently drop layered windows from composition - IsWindowVisible still
+// returns true but the window is gone from screen. The fix is the same one every
+// persistent Windows overlay uses: periodic re-assertion with a position nudge to
+// force the compositor to re-register the surface.
 func recoverIndicator(wakeGap bool) {
 	if !state.indVisible {
 		return // user explicitly hid it via tray menu
@@ -1897,34 +1906,37 @@ func recoverIndicator(wakeGap bool) {
 		return
 	}
 
-	vis, _, _ := pIsWindowVisible.Call(h)
-	if vis == 0 || wakeGap {
-		if vis == 0 {
-			log("Indicator hidden by OS, recovering")
-		} else {
-			log("Wake gap, re-asserting indicator topmost")
-		}
-		// Re-show and force topmost
-		pShowWindow.Call(h, 8) // SW_SHOWNA
-		// HWND_TOPMOST = -1, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE = 0x0001|0x0002|0x0010
-		pSetWindowPos.Call(h, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-
-		// Check if indicator drifted off-screen (resolution/DPI change)
-		sw, _, _ := pGetSystemMetrics.Call(0)
-		sh, _, _ := pGetSystemMetrics.Call(1)
-		var rect [4]int32
-		pGetWindowRect.Call(h, uintptr(unsafe.Pointer(&rect)))
-		ix, iy := int(rect[0]), int(rect[1])
-		if ix > int(sw)-10 || iy > int(sh)-10 || ix < -indSize || iy < -indSize {
-			// Off-screen, reposition to default
-			nx := int(sw) - indSize - 24
-			ny := int(sh) - indSize - 64
-			pSetWindowPos.Call(h, ^uintptr(0), uintptr(nx), uintptr(ny), 0, 0, 0x0002|0x0010) // SWP_NOSIZE|SWP_NOACTIVATE
-			log("Indicator repositioned to (%d, %d)", nx, ny)
-		}
-
-		renderIndicator()
+	// Rebuild GDI on wake (stale DC/DIB from display adapter reset)
+	if wakeGap {
+		log("Wake gap, rebuilding indicator GDI")
+		rebuildIndicatorGDI()
 	}
+
+	// Always re-assert: show + topmost + nudge
+	pShowWindow.Call(h, 8) // SW_SHOWNA
+
+	var rect [4]int32
+	pGetWindowRect.Call(h, uintptr(unsafe.Pointer(&rect)))
+	ix, iy := int(rect[0]), int(rect[1])
+
+	// Check if off-screen (resolution/DPI change)
+	sw, _, _ := pGetSystemMetrics.Call(0)
+	sh, _, _ := pGetSystemMetrics.Call(1)
+	if ix > int(sw)-10 || iy > int(sh)-10 || ix < -indSize || iy < -indSize {
+		ix = int(sw) - indSize - 24
+		iy = int(sh) - indSize - 64
+		log("Indicator repositioned to (%d, %d)", ix, iy)
+	}
+
+	// SetWindowPos to re-assert TOPMOST
+	pSetWindowPos.Call(h, ^uintptr(0), uintptr(ix), uintptr(iy), indSize, indSize, 0x0010) // SWP_NOACTIVATE only
+
+	// Nudge 1px and back - forces DWM to re-register the compositor surface
+	pSetWindowPos.Call(h, ^uintptr(0), uintptr(ix+1), uintptr(iy), indSize, indSize, 0x0010)
+	pSetWindowPos.Call(h, ^uintptr(0), uintptr(ix), uintptr(iy), indSize, indSize, 0x0010)
+
+	// Re-render to push fresh pixels
+	renderIndicator()
 }
 
 func initDistTable() {
@@ -1978,13 +1990,10 @@ func renderIndicator() {
 	// fadeLevel 1.0 = full presence, 0.0 = subtle dot only
 	fl := ind.fadeLevel
 	if fl < 1.0 && p == phaseIdle {
-		// Shrink glow radius and reduce alpha as we fade out
-		minGlow := indDotRadius + 1.5 // barely visible halo
-		glowR = minGlow + fl*(glowR-minGlow)
-		glowAlpha *= 0.15 + 0.85*fl
-		// Keep dot center pulse at minimum 0.35 so the window stays hittable
-		// (UpdateLayeredWindow hit-tests on pixel alpha - zero alpha = click-through)
-		pulse *= 0.35 + 0.65*fl
+		// Reduce glow but keep the dot clearly visible
+		glowAlpha *= 0.3 + 0.7*fl
+		// Keep dot center at minimum 60% so it's always visible and hittable
+		pulse *= 0.6 + 0.4*fl
 	}
 
 	// Single pass using precomputed distance table. Zero sqrt calls.
