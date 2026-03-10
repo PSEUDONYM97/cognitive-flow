@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.6.0
+- Rich tray menu: Recent transcriptions submenu (click to copy), Open Log/Recordings/Config
+- Stats line in tray: version, transcription count, uptime
+- Recent submenu shows last 5 transcriptions with click-to-copy
+- Open Log File, Open Recordings, Edit Config launch with ShellExecute
+
 ## v2.5.1
 - Fix indicator vanishing: DWM silently drops layered windows from composition
 - Periodic topmost re-assertion every ~10s (SetWindowPos)

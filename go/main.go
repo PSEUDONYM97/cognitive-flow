@@ -165,6 +165,7 @@ var (
 	pUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
 
 	pShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
+	pShellExecute    = shell32.NewProc("ShellExecuteW")
 	pSetCapture        = user32.NewProc("SetCapture")
 	pReleaseCapture    = user32.NewProc("ReleaseCapture")
 	pTrackMouseEvent   = user32.NewProc("TrackMouseEvent")
@@ -173,7 +174,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.5.1"
+	version = "2.6.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -355,8 +356,11 @@ var state struct {
 	lastEsc       time.Time
 	lastWake      time.Time
 
-	lastOutput  string  // last transcription result for "Copy Last"
-	lastSamples []int16 // last recording for "Retry Last"
+	lastOutput     string    // last transcription result for "Copy Last"
+	lastSamples    []int16  // last recording for "Retry Last"
+	recentTexts    [5]string // last 5 transcriptions (circular)
+	recentCount    int       // total transcription count
+	startTime      time.Time // for uptime display
 
 	hook     uintptr
 	bar      uintptr // screen-edge recording bar
@@ -383,6 +387,7 @@ func main() {
 
 	state.enabled = true
 	state.running = true
+	state.startTime = time.Now()
 	setPhaseVal(phaseIdle)
 	state.lastWake = time.Now()
 
@@ -1144,6 +1149,10 @@ func transcribe(samples []int16, clipboard bool) {
 	}
 
 	state.lastOutput = text
+	// Track in recent ring buffer
+	idx := state.recentCount % len(state.recentTexts)
+	state.recentTexts[idx] = text
+	state.recentCount++
 
 	// Save to history
 	saveHistory(text, dur, result.Ms, elapsed.Milliseconds())
@@ -2112,6 +2121,10 @@ const (
 	menuCopyLast   = 5
 	menuUpdate     = 6
 	menuRetryLast  = 7
+	menuOpenLog    = 8
+	menuOpenAudio  = 9
+	menuOpenConfig = 10
+	menuRecent0    = 100 // 100-104 for recent transcriptions
 )
 
 var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
@@ -2157,11 +2170,34 @@ var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 				setPhase(phaseProcessing)
 				go transcribe(state.lastSamples, false)
 			}
+		case menuOpenLog:
+			p, _ := syscall.UTF16PtrFromString(filepath.Join(configDir(), "cogflow.log"))
+			pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
+		case menuOpenAudio:
+			p, _ := syscall.UTF16PtrFromString(filepath.Join(configDir(), "audio"))
+			pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
+		case menuOpenConfig:
+			p, _ := syscall.UTF16PtrFromString(filepath.Join(configDir(), "config.json"))
+			pShellExecute.Call(0, 0, uintptr(unsafe.Pointer(p)), 0, 0, 1)
 		case menuUpdate:
 			go downloadUpdate()
 		case menuQuit:
 			shutdown()
 			pPostQuitMessage.Call(0)
+		default:
+			// Recent transcription submenu items (100-104)
+			cmd := uint16(wp)
+			if cmd >= menuRecent0 && cmd < menuRecent0+5 {
+				ri := int(cmd - menuRecent0)
+				if ri < state.recentCount && ri < len(state.recentTexts) {
+					// Map menu index to ring buffer: most recent first
+					bufIdx := (state.recentCount - 1 - ri) % len(state.recentTexts)
+					if state.recentTexts[bufIdx] != "" {
+						copyToClipboard(state.recentTexts[bufIdx])
+						log("Copied recent #%d to clipboard", ri+1)
+					}
+				}
+			}
 		}
 		return 0
 	}
@@ -2200,44 +2236,88 @@ func createTray() {
 
 func showMenu(hwnd uintptr) {
 	h, _, _ := pCreatePopupMenu.Call()
+	mfPopup := uintptr(0x0010)
+	mfGrayed := uintptr(0x0001)
 
-	// Hotkey toggle
+	// --- Toggles ---
 	flags := uintptr(mfString)
 	if state.enabled {
 		flags |= mfChecked
 	}
 	pAppendMenu.Call(h, flags, menuToggle, uintptr(unsafe.Pointer(utf16p("Hotkey Enabled"))))
 
-	// Pause media toggle
 	flags = uintptr(mfString)
 	if cfg.PauseMedia {
 		flags |= mfChecked
 	}
 	pAppendMenu.Call(h, flags, menuPauseMedia, uintptr(unsafe.Pointer(utf16p("Pause Media"))))
 
-	pAppendMenu.Call(h, mfSeparator, 0, 0)
-
-	// Overlay controls
 	label := "Hide Indicator"
 	if !state.indVisible {
 		label = "Show Indicator"
 	}
 	pAppendMenu.Call(h, mfString, menuShowHide, uintptr(unsafe.Pointer(utf16p(label))))
 
-	// Copy last / Retry last
+	pAppendMenu.Call(h, mfSeparator, 0, 0)
+
+	// --- Last recording actions ---
 	copyFlags := uintptr(mfString)
 	if state.lastOutput == "" {
-		copyFlags |= 0x0001 // MF_GRAYED
+		copyFlags |= mfGrayed
 	}
 	pAppendMenu.Call(h, copyFlags, menuCopyLast, uintptr(unsafe.Pointer(utf16p("Copy Last Output"))))
 
 	retryFlags := uintptr(mfString)
 	if len(state.lastSamples) == 0 {
-		retryFlags |= 0x0001 // MF_GRAYED
+		retryFlags |= mfGrayed
 	}
 	pAppendMenu.Call(h, retryFlags, menuRetryLast, uintptr(unsafe.Pointer(utf16p("Retry Last Recording"))))
 
-	// Update available
+	// --- Recent transcriptions submenu ---
+	sub, _, _ := pCreatePopupMenu.Call()
+	count := state.recentCount
+	if count > 5 {
+		count = 5
+	}
+	if count > 0 {
+		for i := 0; i < count; i++ {
+			bufIdx := (state.recentCount - 1 - i) % len(state.recentTexts)
+			text := state.recentTexts[bufIdx]
+			// Truncate for menu display
+			display := text
+			if len(display) > 60 {
+				display = display[:57] + "..."
+			}
+			pAppendMenu.Call(sub, mfString, uintptr(menuRecent0+i), uintptr(unsafe.Pointer(utf16p(display))))
+		}
+	} else {
+		pAppendMenu.Call(sub, mfString|mfGrayed, 0, uintptr(unsafe.Pointer(utf16p("No transcriptions yet"))))
+	}
+	pAppendMenu.Call(h, mfPopup, sub, uintptr(unsafe.Pointer(utf16p("Recent"))))
+
+	pAppendMenu.Call(h, mfSeparator, 0, 0)
+
+	// --- Files ---
+	pAppendMenu.Call(h, mfString, menuOpenLog, uintptr(unsafe.Pointer(utf16p("Open Log File"))))
+	pAppendMenu.Call(h, mfString, menuOpenAudio, uintptr(unsafe.Pointer(utf16p("Open Recordings"))))
+	pAppendMenu.Call(h, mfString, menuOpenConfig, uintptr(unsafe.Pointer(utf16p("Edit Config"))))
+
+	pAppendMenu.Call(h, mfSeparator, 0, 0)
+
+	// --- Stats ---
+	uptime := time.Since(state.startTime)
+	h2 := int(uptime.Hours())
+	m2 := int(uptime.Minutes()) % 60
+	var uptimeStr string
+	if h2 > 0 {
+		uptimeStr = fmt.Sprintf("%dh %dm", h2, m2)
+	} else {
+		uptimeStr = fmt.Sprintf("%dm", m2)
+	}
+	statsLabel := fmt.Sprintf("v%s  |  %d transcriptions  |  %s", version, state.recentCount, uptimeStr)
+	pAppendMenu.Call(h, mfString|mfGrayed, 0, uintptr(unsafe.Pointer(utf16p(statsLabel))))
+
+	// --- Update ---
 	if updateAvailable != "" {
 		pAppendMenu.Call(h, mfString, menuUpdate, uintptr(unsafe.Pointer(utf16p(fmt.Sprintf("Update to v%s", updateAvailable)))))
 	}
