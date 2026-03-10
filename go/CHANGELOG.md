@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.4.2
+- Retry Last Recording in tray menu (re-sends last audio to server)
+- Copy Last Output in tray menu
+
 ## v2.4.1
 - Fix indicator disappearing after sleep: rebuild GDI resources on WM_DISPLAYCHANGE
 - Add WS_EX_NOACTIVATE to indicator window (was missing, bar already had it)

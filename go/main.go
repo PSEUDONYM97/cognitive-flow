@@ -172,7 +172,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.4.1"
+	version = "2.4.2"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -354,7 +354,8 @@ var state struct {
 	lastEsc       time.Time
 	lastWake      time.Time
 
-	lastOutput string // last transcription result for "Copy Last"
+	lastOutput  string  // last transcription result for "Copy Last"
+	lastSamples []int16 // last recording for "Retry Last"
 
 	hook     uintptr
 	bar      uintptr // screen-edge recording bar
@@ -733,6 +734,7 @@ func startRecording() {
 		log("Captured %.1fs", dur)
 
 		// Save audio BEFORE transcription (crash resilient)
+		state.lastSamples = frames
 		saveAudio(frames)
 
 		setPhase(phaseProcessing)
@@ -2014,6 +2016,7 @@ const (
 	menuShowHide   = 4
 	menuCopyLast   = 5
 	menuUpdate     = 6
+	menuRetryLast  = 7
 )
 
 var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
@@ -2052,6 +2055,12 @@ var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			if state.lastOutput != "" {
 				copyToClipboard(state.lastOutput)
 				log("Copied last output to clipboard")
+			}
+		case menuRetryLast:
+			if len(state.lastSamples) > 0 {
+				log("Retrying last recording (%d samples)", len(state.lastSamples))
+				setPhase(phaseProcessing)
+				go transcribe(state.lastSamples, false)
 			}
 		case menuUpdate:
 			go downloadUpdate()
@@ -2120,12 +2129,18 @@ func showMenu(hwnd uintptr) {
 	}
 	pAppendMenu.Call(h, mfString, menuShowHide, uintptr(unsafe.Pointer(utf16p(label))))
 
-	// Copy last output
+	// Copy last / Retry last
 	copyFlags := uintptr(mfString)
 	if state.lastOutput == "" {
 		copyFlags |= 0x0001 // MF_GRAYED
 	}
 	pAppendMenu.Call(h, copyFlags, menuCopyLast, uintptr(unsafe.Pointer(utf16p("Copy Last Output"))))
+
+	retryFlags := uintptr(mfString)
+	if len(state.lastSamples) == 0 {
+		retryFlags |= 0x0001 // MF_GRAYED
+	}
+	pAppendMenu.Call(h, retryFlags, menuRetryLast, uintptr(unsafe.Pointer(utf16p("Retry Last Recording"))))
 
 	// Update available
 	if updateAvailable != "" {
