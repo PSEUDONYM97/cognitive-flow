@@ -135,6 +135,8 @@ var (
 	pCreateIconIndirect  = user32.NewProc("CreateIconIndirect")
 	pDestroyIcon         = user32.NewProc("DestroyIcon")
 
+	pIsWindowVisible       = user32.NewProc("IsWindowVisible")
+	pGetWindowRect         = user32.NewProc("GetWindowRect")
 	pPostThreadMessage     = user32.NewProc("PostThreadMessageW")
 	pGetCurrentThreadId    = kernel32.NewProc("GetCurrentThreadId")
 	pGlobalAlloc           = kernel32.NewProc("GlobalAlloc")
@@ -165,13 +167,12 @@ var (
 	pShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 	pSetCapture      = user32.NewProc("SetCapture")
 	pReleaseCapture  = user32.NewProc("ReleaseCapture")
-	pGetWindowRect   = user32.NewProc("GetWindowRect")
 )
 
 // ----- Constants -----
 
 const (
-	version = "2.4.0"
+	version = "2.4.1"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -352,6 +353,8 @@ var state struct {
 	indVisible    bool
 	lastEsc       time.Time
 	lastWake      time.Time
+
+	lastOutput string // last transcription result for "Copy Last"
 
 	hook     uintptr
 	bar      uintptr // screen-edge recording bar
@@ -1137,6 +1140,8 @@ func transcribe(samples []int16, clipboard bool) {
 		log("  raw: %s", raw)
 	}
 
+	state.lastOutput = text
+
 	// Save to history
 	saveHistory(text, dur, result.Ms, elapsed.Milliseconds())
 
@@ -1580,11 +1585,15 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 		}
 		if wp == timerHeartbeat {
 			now := time.Now()
-			if now.Sub(state.lastWake) > 60*time.Second {
+			wakeGap := now.Sub(state.lastWake) > 60*time.Second
+			if wakeGap {
 				log("Wake detected, pinging server")
 				go healthCheck()
 			}
 			state.lastWake = now
+
+			// Self-heal indicator: recover from sleep/compositor hiding
+			recoverIndicator(wakeGap)
 		}
 		return 0
 
@@ -1707,6 +1716,11 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			renderIndicator()
 		}
 		return 0
+
+	case 0x007E: // WM_DISPLAYCHANGE - display resolution/depth changed (sleep/wake, dock, etc.)
+		log("WM_DISPLAYCHANGE: rebuilding indicator GDI resources")
+		rebuildIndicatorGDI()
+		return 0
 	}
 
 	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
@@ -1728,7 +1742,7 @@ func createIndicator() {
 	y := int(sh) - indSize - 64
 
 	hwnd, _, _ := pCreateWindowEx.Call(
-		wsExLayered|wsExTopmost|wsExToolWindow,
+		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate,
 		uintptr(unsafe.Pointer(cls)), 0,
 		wsPopup, uintptr(x), uintptr(y), indSize, indSize,
 		0, 0, 0, 0,
@@ -1764,6 +1778,86 @@ func createIndicator() {
 
 	// Slow heartbeat timer when idle (redraws on state changes via applyPhase)
 	pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
+}
+
+// rebuildIndicatorGDI recreates the memory DC and DIB from a fresh screen DC.
+// Called on WM_DISPLAYCHANGE when the display adapter resets (sleep/wake, dock/undock).
+// Without this, UpdateLayeredWindow silently fails because the old DIB is stale.
+func rebuildIndicatorGDI() {
+	// Clean up old GDI objects
+	if ind.dib != 0 {
+		pDeleteObject.Call(ind.dib)
+	}
+	if ind.memDC != 0 {
+		pDeleteDC.Call(ind.memDC)
+	}
+
+	// Create fresh from current screen DC
+	screenDC, _, _ := pGetDC.Call(0)
+	ind.memDC, _, _ = pCreateCompatibleDC.Call(screenDC)
+	pReleaseDC.Call(0, screenDC)
+
+	bmi := bmpinfo{
+		Size:   uint32(unsafe.Sizeof(bmpinfo{})),
+		Width:  indSize,
+		Height: -indSize,
+		Planes: 1,
+		Bits:   32,
+	}
+	var bits uintptr
+	ind.dib, _, _ = pCreateDIBSection.Call(
+		ind.memDC, uintptr(unsafe.Pointer(&bmi)), 0,
+		uintptr(unsafe.Pointer(&bits)), 0, 0,
+	)
+	pSelectObject.Call(ind.memDC, ind.dib)
+	ind.pixels = unsafe.Slice((*byte)(unsafe.Pointer(bits)), indSize*indSize*4)
+
+	// Re-render with fresh resources
+	renderIndicator()
+
+	// Re-assert topmost in case z-order got scrambled
+	pSetWindowPos.Call(ind.hwnd, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
+}
+
+// recoverIndicator checks if the indicator window got hidden by sleep/compositor
+// and forces it back to visible + topmost. Called from the bar's heartbeat timer.
+func recoverIndicator(wakeGap bool) {
+	if !state.indVisible {
+		return // user explicitly hid it via tray menu
+	}
+	h := ind.hwnd
+	if h == 0 {
+		return
+	}
+
+	vis, _, _ := pIsWindowVisible.Call(h)
+	if vis == 0 || wakeGap {
+		if vis == 0 {
+			log("Indicator hidden by OS, recovering")
+		} else {
+			log("Wake gap, re-asserting indicator topmost")
+		}
+		// Re-show and force topmost
+		pShowWindow.Call(h, 8) // SW_SHOWNA
+		// HWND_TOPMOST = -1, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE = 0x0001|0x0002|0x0010
+		pSetWindowPos.Call(h, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
+
+		// Check if indicator drifted off-screen (resolution/DPI change)
+		sw, _, _ := pGetSystemMetrics.Call(0)
+		sh, _, _ := pGetSystemMetrics.Call(1)
+		var rect [4]int32
+		pGetWindowRect.Call(h, uintptr(unsafe.Pointer(&rect)))
+		ix, iy := int(rect[0]), int(rect[1])
+		if ix > int(sw)-10 || iy > int(sh)-10 || ix < -indSize || iy < -indSize {
+			// Off-screen, reposition to default
+			nx := int(sw) - indSize - 24
+			ny := int(sh) - indSize - 64
+			pSetWindowPos.Call(h, ^uintptr(0), uintptr(nx), uintptr(ny), 0, 0, 0x0002|0x0010) // SWP_NOSIZE|SWP_NOACTIVATE
+			log("Indicator repositioned to (%d, %d)", nx, ny)
+		}
+
+		renderIndicator()
+	}
 }
 
 func initDistTable() {
@@ -1918,6 +2012,7 @@ const (
 	menuQuit       = 2
 	menuPauseMedia = 3
 	menuShowHide   = 4
+	menuCopyLast   = 5
 	menuUpdate     = 6
 )
 
@@ -1952,6 +2047,11 @@ var trayProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			} else {
 				pShowWindow.Call(ind.hwnd, 8) // SW_SHOWNA
 				state.indVisible = true
+			}
+		case menuCopyLast:
+			if state.lastOutput != "" {
+				copyToClipboard(state.lastOutput)
+				log("Copied last output to clipboard")
 			}
 		case menuUpdate:
 			go downloadUpdate()
@@ -2019,6 +2119,13 @@ func showMenu(hwnd uintptr) {
 		label = "Show Indicator"
 	}
 	pAppendMenu.Call(h, mfString, menuShowHide, uintptr(unsafe.Pointer(utf16p(label))))
+
+	// Copy last output
+	copyFlags := uintptr(mfString)
+	if state.lastOutput == "" {
+		copyFlags |= 0x0001 // MF_GRAYED
+	}
+	pAppendMenu.Call(h, copyFlags, menuCopyLast, uintptr(unsafe.Pointer(utf16p("Copy Last Output"))))
 
 	// Update available
 	if updateAvailable != "" {

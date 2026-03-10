@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.4.1
+- Fix indicator disappearing after sleep: rebuild GDI resources on WM_DISPLAYCHANGE
+- Add WS_EX_NOACTIVATE to indicator window (was missing, bar already had it)
+- Indicator self-healing heartbeat: recovers from compositor hiding, repositions if off-screen
+- Copy Last Output in tray menu (grayed when no transcription yet)
+- Self-update system: GitHub release polling, SHA256 verification, tray menu download
+
 ## v2.4.0
 - Text injection via WM_CHAR PostMessage (matches Python behavior, no more slow SendInput)
 - Smart media pause: WASAPI peak meter detects if audio is actually playing
