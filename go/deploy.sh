@@ -1,11 +1,12 @@
 #!/bin/bash
-# deploy.sh - Build, version, deploy, commit. No excuses.
+# deploy.sh - Build, version, deploy, commit, push. No excuses, no shortcuts.
 #
 # Usage:
 #   ./deploy.sh patch "Fixed the thing"      # 2.4.0 -> 2.4.1
 #   ./deploy.sh minor "Added new feature"    # 2.4.0 -> 2.5.0
 #   ./deploy.sh major "Breaking change"      # 2.4.0 -> 3.0.0
-#   ./deploy.sh build                        # Just build + deploy, no version bump
+#
+# There is no "build only" option. Every deploy gets a version.
 
 set -e
 
@@ -13,6 +14,21 @@ GOBIN="/usr/local/go/bin/go"
 MAIN="main.go"
 CHANGELOG="CHANGELOG.md"
 OUT="../cogflow.exe"
+
+BUMP="${1:-}"
+DESC="$2"
+
+if [ -z "$BUMP" ]; then
+    echo "ERROR: Specify bump type."
+    echo "Usage: ./deploy.sh patch|minor|major \"What changed\""
+    exit 1
+fi
+
+if [ -z "$DESC" ]; then
+    echo "ERROR: Need a description."
+    echo "Usage: ./deploy.sh $BUMP \"What changed\""
+    exit 1
+fi
 
 # Extract current version
 CURRENT=$(grep 'version = "' "$MAIN" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -23,41 +39,26 @@ fi
 
 echo "Current: v$CURRENT"
 
-BUMP="${1:-build}"
-DESC="$2"
+IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+case "$BUMP" in
+    patch) PAT=$((PAT + 1)) ;;
+    minor) MIN=$((MIN + 1)); PAT=0 ;;
+    major) MAJ=$((MAJ + 1)); MIN=0; PAT=0 ;;
+    *) echo "ERROR: Use patch, minor, or major"; exit 1 ;;
+esac
+NEW="$MAJ.$MIN.$PAT"
 
-if [ "$BUMP" = "build" ]; then
-    NEW="$CURRENT"
-    echo "Build-only (no version bump)"
-else
-    if [ -z "$DESC" ]; then
-        echo "ERROR: Need a description."
-        echo "Usage: ./deploy.sh $BUMP \"What changed\""
-        exit 1
-    fi
+echo "Bumping: v$CURRENT -> v$NEW"
 
-    IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
-    case "$BUMP" in
-        patch) PAT=$((PAT + 1)) ;;
-        minor) MIN=$((MIN + 1)); PAT=0 ;;
-        major) MAJ=$((MAJ + 1)); MIN=0; PAT=0 ;;
-        *) echo "ERROR: Use patch, minor, major, or build"; exit 1 ;;
-    esac
-    NEW="$MAJ.$MIN.$PAT"
+# Update version in main.go
+sed -i "s/version = \"$CURRENT\"/version = \"$NEW\"/" "$MAIN"
 
-    echo "Bumping: v$CURRENT -> v$NEW"
+# Prepend to CHANGELOG
+HEADER="## v$NEW"
+ENTRY="- $DESC"
+sed -i "/^# Changelog$/a\\\\n$HEADER\n$ENTRY" "$CHANGELOG"
 
-    # Update version in main.go
-    sed -i "s/version = \"$CURRENT\"/version = \"$NEW\"/" "$MAIN"
-
-    # Prepend to CHANGELOG
-    HEADER="## v$NEW"
-    ENTRY="- $DESC"
-    # Insert after the first line ("# Changelog")
-    sed -i "/^# Changelog$/a\\\\n$HEADER\n$ENTRY" "$CHANGELOG"
-
-    echo "Updated $MAIN and $CHANGELOG"
-fi
+echo "Updated $MAIN and $CHANGELOG"
 
 # Build
 echo "Building v$NEW..."
@@ -94,33 +95,35 @@ sha256sum "$OUT" | awk '{print $1}' > "$SHA_FILE"
 SHA=$(cat "$SHA_FILE")
 echo "SHA256: $SHA"
 
-# Commit (only on version bump)
-if [ "$BUMP" != "build" ]; then
-    echo ""
-    echo "Committing..."
-    cd "$(dirname "$0")"
-    git add main.go CHANGELOG.md
-    git commit -m "v$NEW: $DESC
+# Commit + push
+echo ""
+echo "Committing..."
+cd "$(dirname "$0")"
+git add main.go CHANGELOG.md deploy.sh
+git commit -m "v$NEW: $DESC
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
-    echo "Committed: v$NEW"
+echo "Committed: v$NEW"
 
-    # GitHub release
-    echo ""
-    echo "Creating GitHub release v$NEW..."
-    REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]\(.*\)\.git/\1/' | sed 's/.*github.com[:/]\(.*\)/\1/')
-    if [ -n "$REPO" ] && command -v gh &>/dev/null; then
-        git tag "v$NEW"
-        git push origin "v$NEW" 2>/dev/null || true
-        gh release create "v$NEW" \
-            --title "v$NEW" \
-            --notes "$DESC" \
-            "$OUT#cogflow.exe" \
-            "$SHA_FILE#cogflow.exe.sha256" \
-            2>/dev/null && echo "Release created: v$NEW" || echo "Release creation failed (push manually)"
-    else
-        echo "Skipped release (no gh CLI or no remote)"
-    fi
+echo "Pushing..."
+git push origin HEAD
+echo "Pushed."
+
+# GitHub release
+echo ""
+echo "Creating GitHub release v$NEW..."
+REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]\(.*\)\.git/\1/' | sed 's/.*github.com[:/]\(.*\)/\1/')
+if [ -n "$REPO" ] && command -v gh &>/dev/null; then
+    git tag "v$NEW"
+    git push origin "v$NEW" 2>/dev/null || true
+    gh release create "v$NEW" \
+        --title "v$NEW" \
+        --notes "$DESC" \
+        "$OUT#cogflow.exe" \
+        "$SHA_FILE#cogflow.exe.sha256" \
+        2>/dev/null && echo "Release created: v$NEW" || echo "Release creation failed (push manually)"
+else
+    echo "Skipped release (no gh CLI or no remote)"
 fi
 
 echo ""
