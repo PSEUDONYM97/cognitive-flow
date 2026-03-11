@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.8.3
+- Fix IID_IMMDeviceEnumerator GUID (was wrong since initial implementation, audio detection never worked)
+- isAudioPlaying() now correctly detects system audio via WASAPI peak meter
+
+## v2.8.2
+- Fix media double-trigger: send to foreground window (shell routing) instead of HWND_BROADCAST
+- Fix accidental play on resume: only resume if audio was confirmed playing before pause
+- Add detailed COM logging to isAudioPlaying for debugging peak meter failures
+
+## v2.8.1
+- Remove toggle key (VK_MEDIA_PLAY_PAUSE) from pause - directional APPCOMMAND only
+- Fixes double-trigger where toggle and directional command fought each other
+
+## v2.8.0
+- Design rebrand: cyan (#22D3EE) indicator, recording bar, and tray icon replacing green/red
+- Dashboard redesign: professional dark theme with design-team CSS, 6 stat cards, p95 timing
+- Media pause fix: directional APPCOMMAND_MEDIA_PAUSE/PLAY instead of toggle VK_MEDIA_PLAY_PAUSE
+- Media commands broadcast to all windows (fixes YouTube not responding to media keys)
+- Resume uses directional play-only command (prevents accidentally pausing other media)
+
 ## v2.7.0
 - Web dashboard: local HTTP server on 127.0.0.1 with history browser, stats, vocabulary editor
 - Dashboard tab: stat cards (total transcriptions, minutes recorded, avg server time, uptime, session count)

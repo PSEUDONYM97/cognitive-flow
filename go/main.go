@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,6 +130,7 @@ var (
 	pReleaseDC           = user32.NewProc("ReleaseDC")
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	pPostMessage         = user32.NewProc("PostMessageW")
+	pSendMessage         = user32.NewProc("SendMessageW")
 	pCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
 	pAppendMenu          = user32.NewProc("AppendMenuW")
 	pTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -175,7 +177,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.7.0"
+	version = "2.8.3"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -525,14 +527,20 @@ func keyDown(vk uintptr) bool {
 }
 
 // ----- Media control -----
-// Pauses media playback during recording so mic doesn't pick up audio.
-// Checks if audio is actually playing via WASAPI peak meter before pausing.
-// Only resumes if WE caused the pause.
+// Pauses media during recording so mic doesn't pick up playback, and resumes after.
+// Uses DIRECTIONAL WM_APPCOMMAND (APPCOMMAND_MEDIA_PAUSE=47 / APPCOMMAND_MEDIA_PLAY=46)
+// sent to the foreground window. DefWindowProc routes unhandled commands to the shell,
+// which forwards to the active SMTC media session handler (Chrome, Spotify, etc.).
+// Only resumes if audio was confirmed playing when we paused.
 
-const vkMediaPlayPause = 0xB3
+const (
+	wmAppCommand     = 0x0319
+	appCmdMediaPlay  = 46 // directional: only plays, never pauses
+	appCmdMediaPause = 47 // directional: only pauses, never plays
+)
 
 var (
-	mediaPaused bool // true if WE sent a pause
+	mediaPaused bool // true if WE paused and should resume
 	ole32       = windows.NewLazySystemDLL("ole32.dll")
 	pCoInit     = ole32.NewProc("CoInitializeEx")
 	pCoCreateInst = ole32.NewProc("CoCreateInstance")
@@ -541,19 +549,35 @@ var (
 // WASAPI COM GUIDs
 var (
 	clsidMMDevEnum = [16]byte{0x95, 0x03, 0xDE, 0xBC, 0x2F, 0xE5, 0x7C, 0x46, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}
-	iidIMMDevEnum  = [16]byte{0x79, 0xFB, 0x1D, 0xA4, 0x05, 0x47, 0xDA, 0x44, 0x95, 0x8A, 0x61, 0x2F, 0x72, 0x46, 0xBE, 0x85}
+	// IID_IMMDeviceEnumerator {A95664D2-9614-4F35-A746-DE8DB63617E6}
+	iidIMMDevEnum = [16]byte{0xD2, 0x64, 0x56, 0xA9, 0x14, 0x96, 0x35, 0x4F, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}
 	iidAudioMeter  = [16]byte{0xF6, 0x16, 0x22, 0xC0, 0x67, 0x8C, 0x5B, 0x4B, 0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64}
 )
 
-// isAudioPlaying checks if any audio is being output via the default render device.
-// Uses IAudioMeterInformation::GetPeakValue - if peak > 0, something is playing.
-func isAudioPlaying() bool {
-	// Initialize COM on this goroutine
-	pCoInit.Call(0, 0) // COINIT_MULTITHREADED
+// sendAppCommand sends a directional media command via WM_APPCOMMAND to the foreground window.
+// DefWindowProc routes unhandled commands up the parent chain to the shell's SMTC router.
+func sendAppCommand(cmd int) {
+	fg, _, _ := pGetForegroundWindow.Call()
+	if fg == 0 {
+		log("sendAppCommand(%d): no foreground window", cmd)
+		return
+	}
+	// wParam = originating window, lParam = (cmd << 16) | FAPPCOMMAND_KEY(0)
+	pSendMessage.Call(fg, wmAppCommand, fg, uintptr(cmd<<16))
+}
 
-	// Create MMDeviceEnumerator
+// isAudioPlaying checks if any audio is being output via the default render device.
+// Uses IAudioMeterInformation::GetPeakValue. Logs each COM step for debugging.
+func isAudioPlaying() bool {
+	hr, _, _ := pCoInit.Call(0, 0) // COINIT_MULTITHREADED
+	// hr 0 = success, 1 = already initialized (S_FALSE) - both OK
+	if hr != 0 && hr != 1 {
+		log("isAudioPlaying: CoInitializeEx failed: 0x%x", hr)
+		return false
+	}
+
 	var enumPtr uintptr
-	hr, _, _ := pCoCreateInst.Call(
+	hr, _, _ = pCoCreateInst.Call(
 		uintptr(unsafe.Pointer(&clsidMMDevEnum)),
 		0,
 		1|4, // CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER
@@ -561,7 +585,8 @@ func isAudioPlaying() bool {
 		uintptr(unsafe.Pointer(&enumPtr)),
 	)
 	if hr != 0 || enumPtr == 0 {
-		return false // can't check, assume not playing
+		log("isAudioPlaying: CoCreateInstance failed: hr=0x%x ptr=%d", hr, enumPtr)
+		return false
 	}
 	defer comRelease(enumPtr)
 
@@ -570,6 +595,7 @@ func isAudioPlaying() bool {
 	var devicePtr uintptr
 	hr, _, _ = syscall.SyscallN(vtbl[4], enumPtr, 0, 0, uintptr(unsafe.Pointer(&devicePtr)))
 	if hr != 0 || devicePtr == 0 {
+		log("isAudioPlaying: GetDefaultAudioEndpoint failed: hr=0x%x", hr)
 		return false
 	}
 	defer comRelease(devicePtr)
@@ -584,6 +610,7 @@ func isAudioPlaying() bool {
 		uintptr(unsafe.Pointer(&meterPtr)),
 	)
 	if hr != 0 || meterPtr == 0 {
+		log("isAudioPlaying: Activate AudioMeter failed: hr=0x%x", hr)
 		return false
 	}
 	defer comRelease(meterPtr)
@@ -593,9 +620,11 @@ func isAudioPlaying() bool {
 	var peak float32
 	hr, _, _ = syscall.SyscallN(vtbl3[3], meterPtr, uintptr(unsafe.Pointer(&peak)))
 	if hr != 0 {
+		log("isAudioPlaying: GetPeakValue failed: hr=0x%x", hr)
 		return false
 	}
 
+	log("isAudioPlaying: peak=%.6f", peak)
 	return peak > 0.001
 }
 
@@ -608,13 +637,14 @@ func pauseMedia() {
 	if !cfg.PauseMedia {
 		return
 	}
-	if !isAudioPlaying() {
+	playing := isAudioPlaying()
+	if !playing {
 		log("No audio playing, skipping pause")
 		return
 	}
-	sendKey(vkMediaPlayPause, keyeventfExtended)
+	sendAppCommand(appCmdMediaPause)
 	mediaPaused = true
-	log("Media paused")
+	log("Media paused (directional)")
 }
 
 func resumeMedia() {
@@ -622,8 +652,8 @@ func resumeMedia() {
 		return
 	}
 	mediaPaused = false
-	sendKey(vkMediaPlayPause, keyeventfExtended)
-	log("Media resumed")
+	sendAppCommand(appCmdMediaPlay)
+	log("Media resumed (directional)")
 }
 
 // ----- Recording flow -----
@@ -1103,7 +1133,6 @@ func handleAPIVocabDelete(w http.ResponseWriter, r *http.Request) {
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	// Load history
 	histPath := filepath.Join(configDir(), "history.json")
 	var history []historyEntry
 	if data, err := os.ReadFile(histPath); err == nil {
@@ -1115,213 +1144,537 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		history[i], history[j] = history[j], history[i]
 	}
 
-	// Build history rows as JSON for client-side rendering
-	histJSON, _ := json.Marshal(history)
-
-	// Build vocab as JSON
-	vocabJSON, _ := json.Marshal(cfg.Replacements)
-
-	// Stats
+	n := len(history)
 	var totalDur, totalServer float64
+	var serverTimes []float64
+	today := time.Now().Format("2006-01-02")
+	todayCount := 0
+
 	for _, h := range history {
 		totalDur += h.DurationS
 		totalServer += h.ServerMs
+		if h.ServerMs > 0 {
+			serverTimes = append(serverTimes, h.ServerMs)
+		}
+		if strings.HasPrefix(h.Timestamp, today) {
+			todayCount++
+		}
 	}
-	n := len(history)
-	avgMs := int64(0)
-	if n > 0 {
-		avgMs = int64(totalServer) / int64(n)
-	}
-	uptime := time.Since(state.startTime)
 
-	fmt.Fprintf(w, dashboardHTML,
-		version,
-		n, int(totalDur/60), avgMs, int(uptime.Hours()), int(uptime.Minutes())%60, state.recentCount,
-		string(histJSON), string(vocabJSON),
-	)
+	avgServer := int64(0)
+	avgDuration := 0.0
+	p95Server := int64(0)
+	if n > 0 {
+		avgServer = int64(totalServer) / int64(n)
+		avgDuration = totalDur / float64(n)
+	}
+	if len(serverTimes) > 0 {
+		sort.Float64s(serverTimes)
+		idx := int(float64(len(serverTimes)) * 0.95)
+		if idx >= len(serverTimes) {
+			idx = len(serverTimes) - 1
+		}
+		p95Server = int64(serverTimes[idx])
+	}
+
+	uptime := time.Since(state.startTime)
+	uptimeStr := ""
+	if uptime.Hours() >= 1 {
+		uptimeStr = fmt.Sprintf("%dh %dm", int(uptime.Hours()), int(uptime.Minutes())%60)
+	} else {
+		uptimeStr = fmt.Sprintf("%dm", int(uptime.Minutes()))
+	}
+	startedStr := state.startTime.Format("3:04 PM")
+
+	statsObj := map[string]interface{}{
+		"version":      version,
+		"total":        n,
+		"today":        todayCount,
+		"minutes":      totalDur / 60.0,
+		"avg_duration": avgDuration,
+		"avg_server":   avgServer,
+		"p95_server":   p95Server,
+		"uptime":       uptimeStr,
+		"started":      startedStr,
+		"sessions":     state.recentCount,
+		"corrections":  len(cfg.Replacements),
+	}
+
+	statsJSON, _ := json.Marshal(statsObj)
+	histJSON, _ := json.Marshal(history)
+	vocabJSON, _ := json.Marshal(cfg.Replacements)
+
+	html := strings.Replace(dashboardHTML, "/**STATS**/null", string(statsJSON), 1)
+	html = strings.Replace(html, "/**HISTORY**/[]", string(histJSON), 1)
+	html = strings.Replace(html, "/**VOCAB**/{}", string(vocabJSON), 1)
+	io.WriteString(w, html)
 }
 
 const dashboardHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Cognitive Flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://unpkg.com/lucide-static@latest/font/lucide.css" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
-.header{background:#16213e;padding:20px 32px;border-bottom:1px solid #0f3460}
-.header h1{font-size:20px;font-weight:600;color:#fff}
-.header span{font-size:13px;color:#8892b0;margin-left:12px}
-.tabs{display:flex;gap:0;background:#16213e;border-bottom:2px solid #0f3460}
-.tab{padding:12px 28px;cursor:pointer;color:#8892b0;font-size:14px;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s}
-.tab:hover{color:#ccd6f6}
-.tab.active{color:#64ffda;border-bottom-color:#64ffda}
-.content{max-width:960px;margin:0 auto;padding:24px 32px}
-.section{display:none}
-.section.active{display:block}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;margin-bottom:28px}
-.card{background:#16213e;border-radius:8px;padding:16px;border:1px solid #1a1a40}
-.card .val{font-size:28px;font-weight:700;color:#64ffda}
-.card .lbl{font-size:12px;color:#8892b0;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
-.search{width:100%%;padding:10px 16px;background:#16213e;border:1px solid #1a1a40;border-radius:6px;color:#e0e0e0;font-size:14px;margin-bottom:16px;outline:none}
-.search:focus{border-color:#64ffda}
-table{width:100%%;border-collapse:collapse}
-th{text-align:left;padding:8px 12px;color:#8892b0;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #1a1a40}
-td{padding:10px 12px;border-bottom:1px solid #1a1a40;font-size:13px}
-.hist-row{cursor:pointer;transition:background .1s}
-.hist-row:hover{background:#1a1a40}
-.hist-row .text-cell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:500px}
-.ts{color:#8892b0;white-space:nowrap}
-.ms{color:#8892b0;text-align:right}
-.toast{position:fixed;bottom:24px;right:24px;background:#64ffda;color:#1a1a2e;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;opacity:0;transition:opacity .2s;pointer-events:none}
-.toast.show{opacity:1}
-.vocab-form{display:flex;gap:8px;margin-bottom:16px}
-.vocab-form input{flex:1;padding:8px 12px;background:#16213e;border:1px solid #1a1a40;border-radius:6px;color:#e0e0e0;font-size:13px;outline:none}
-.vocab-form input:focus{border-color:#64ffda}
-.vocab-form button,.del-btn{background:#64ffda;color:#1a1a2e;border:none;padding:8px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
-.vocab-form button:hover{background:#4cd6b0}
-.del-btn{background:#e74c3c;color:#fff;padding:4px 10px;font-size:11px;border-radius:4px}
-.del-btn:hover{background:#c0392b}
-.empty{color:#8892b0;text-align:center;padding:40px;font-size:14px}
+:root{
+  --bg-deep:#0A0F1C;--bg-card:#1E293B;--bg-inset:#0F172A;
+  --accent-cyan:#22D3EE;--accent-cyan-dim:#22D3EE33;--accent-cyan-hover:#06B6D4;
+  --text-primary:#FFF;--text-secondary:#94A3B8;--text-tertiary:#64748B;--text-muted:#475569;--text-inverted:#0A0F1C;
+  --color-success:#22C55E;--color-warning:#EAB308;--color-error:#EF4444;
+  --divider:#0F172A;--border-subtle:#2D3748;
+  --radius-sm:4px;--radius-md:6px;--radius-lg:8px;--radius-xl:12px;
+  --font-mono:"JetBrains Mono","Fira Code","Cascadia Code",monospace;
+  --font-sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --text-xs:10px;--text-sm:11px;--text-base:13px;--text-md:14px;--text-lg:15px;
+  --text-5xl:32px;
+  --transition-fast:150ms ease;--transition-base:200ms ease;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:var(--font-sans);background:var(--bg-deep);color:var(--text-primary);-webkit-font-smoothing:antialiased}
+.section-label{font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600;color:var(--text-muted);letter-spacing:2px;text-transform:uppercase}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:var(--bg-deep)}
+::-webkit-scrollbar-thumb{background:var(--text-muted);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--text-tertiary)}
+:focus-visible{outline:2px solid var(--accent-cyan);outline-offset:2px}
+::selection{background:var(--accent-cyan);color:var(--text-inverted)}
+
+.dashboard{display:flex;flex-direction:column;height:100vh;background:var(--bg-deep);overflow:hidden}
+.dash-header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;background:var(--bg-card);flex-shrink:0}
+.dash-header__brand{display:flex;align-items:center;gap:12px}
+.dash-header__logo{display:flex;align-items:center;justify-content:center;width:28px;height:28px;background:var(--accent-cyan);border-radius:var(--radius-md);color:var(--text-inverted)}
+.dash-header__logo i{font-size:16px}
+.dash-header__title{font-family:var(--font-mono);font-size:var(--text-lg);font-weight:700;color:var(--text-primary)}
+.dash-tabs{display:flex;gap:0;background:var(--bg-inset);border-radius:var(--radius-lg);padding:4px}
+.dash-tabs__tab{padding:8px 20px;border-radius:var(--radius-md);font-family:var(--font-mono);font-size:12px;font-weight:500;color:var(--text-muted);cursor:pointer;border:none;background:none;transition:all var(--transition-fast);white-space:nowrap}
+.dash-tabs__tab:hover{color:var(--text-secondary)}
+.dash-tabs__tab--active{background:var(--accent-cyan);color:var(--text-inverted);font-weight:600}
+.dash-tabs__tab--active:hover{color:var(--text-inverted)}
+.dash-header__status{display:flex;align-items:center;gap:8px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--color-success)}
+.status-dot--error{background:var(--color-error)}
+.dash-header__status-text{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-tertiary)}
+
+.dash-body{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:24px}
+.tab-panel{display:none;flex-direction:column;gap:24px;flex:1}
+.tab-panel--active{display:flex}
+
+.stats-grid{display:flex;gap:16px}
+.stat-card{flex:1;display:flex;flex-direction:column;gap:8px;padding:20px;background:var(--bg-card);border-radius:var(--radius-lg)}
+.stat-card__label{font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600;color:var(--text-muted);letter-spacing:1.5px}
+.stat-card__value{font-family:var(--font-mono);font-size:var(--text-5xl);font-weight:700;color:var(--text-primary);line-height:1}
+.stat-card__value--accent{color:var(--accent-cyan)}
+.stat-card__meta{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-tertiary)}
+
+.activity-list{background:var(--bg-card);border-radius:var(--radius-lg);overflow:hidden}
+.activity-item{display:flex;align-items:start;justify-content:space-between;padding:12px 16px;gap:12px}
+.activity-item+.activity-item{border-top:1px solid var(--divider)}
+.activity-item__content{flex:1;display:flex;flex-direction:column;gap:4px;min-width:0}
+.activity-item__text{font-family:var(--font-sans);font-size:var(--text-base);color:var(--text-primary);line-height:1.4}
+.activity-item__meta{font-family:var(--font-mono);font-size:var(--text-xs);color:var(--text-muted)}
+.activity-item__copy{flex-shrink:0;color:var(--text-muted);cursor:pointer;padding:4px;border:none;background:none;transition:color var(--transition-fast)}
+.activity-item__copy:hover{color:var(--accent-cyan)}
+
+.search-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);width:100%}
+.search-bar__input{flex:1;background:none;border:none;outline:none;font-family:var(--font-sans);font-size:var(--text-base);color:var(--text-primary)}
+.search-bar__input::placeholder{color:var(--text-muted)}
+.search-bar__icon{color:var(--text-muted);flex-shrink:0}
+.history-count{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-tertiary)}
+
+.vocab-add{display:flex;flex-direction:column;gap:12px}
+.vocab-add__row{display:flex;align-items:center;gap:12px}
+.vocab-add__input{flex:1;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);font-family:var(--font-sans);font-size:var(--text-base);color:var(--text-primary);outline:none;transition:border-color var(--transition-fast)}
+.vocab-add__input::placeholder{color:var(--text-muted)}
+.vocab-add__input:focus{border-color:var(--accent-cyan)}
+.vocab-add__arrow{color:var(--text-tertiary);flex-shrink:0}
+.vocab-add__btn{display:flex;align-items:center;gap:6px;padding:12px 20px;background:var(--accent-cyan);color:var(--text-inverted);border:none;border-radius:var(--radius-lg);font-family:var(--font-mono);font-size:12px;font-weight:600;cursor:pointer;transition:background var(--transition-fast);white-space:nowrap}
+.vocab-add__btn:hover{background:var(--accent-cyan-hover)}
+
+.vocab-header{display:flex;align-items:center;justify-content:space-between}
+.vocab-count{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-muted)}
+.vocab-table{width:100%;background:var(--bg-card);border-radius:var(--radius-lg);overflow:hidden;border-collapse:collapse}
+.vocab-table thead{background:var(--bg-inset)}
+.vocab-table th{padding:10px 16px;font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600;color:var(--text-muted);letter-spacing:1.5px;text-align:left}
+.vocab-table th:last-child{width:40px}
+.vocab-table td{padding:12px 16px;font-family:var(--font-mono);font-size:var(--text-base)}
+.vocab-table tr+tr{border-top:1px solid var(--divider)}
+.vocab-table__from{color:var(--text-primary)}
+.vocab-table__to{color:var(--accent-cyan)}
+.vocab-table__delete{color:var(--text-muted);cursor:pointer;border:none;background:none;padding:4px;transition:color var(--transition-fast)}
+.vocab-table__delete:hover{color:var(--color-error)}
+
+.toast-container{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);pointer-events:auto;opacity:0;transform:translateX(100%);transition:all var(--transition-base);min-width:320px;max-width:420px}
+.toast--visible{opacity:1;transform:translateX(0)}
+.toast__icon{flex-shrink:0;font-size:18px}
+.toast--success .toast__icon{color:var(--color-success)}
+.toast--warning .toast__icon{color:var(--color-warning)}
+.toast--error .toast__icon{color:var(--color-error)}
+.toast--info .toast__icon{color:var(--accent-cyan)}
+.toast__content{display:flex;flex-direction:column;gap:2px}
+.toast__title{font-family:var(--font-sans);font-size:var(--text-base);font-weight:500;color:var(--text-primary)}
+.toast__message{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-tertiary)}
+.empty{color:var(--text-muted);text-align:center;padding:40px;font-size:var(--text-base)}
 </style>
 </head>
 <body>
-<div class="header">
-  <h1>Cognitive Flow <span>v%s</span></h1>
-</div>
-<div class="tabs">
-  <div class="tab active" data-tab="dashboard">Dashboard</div>
-  <div class="tab" data-tab="history">History</div>
-  <div class="tab" data-tab="vocab">Vocabulary</div>
-</div>
-
-<div class="content">
-  <div class="section active" id="dashboard">
-    <div class="cards">
-      <div class="card"><div class="val">%d</div><div class="lbl">Total Transcriptions</div></div>
-      <div class="card"><div class="val">%d</div><div class="lbl">Minutes Recorded</div></div>
-      <div class="card"><div class="val">%dms</div><div class="lbl">Avg Server Time</div></div>
-      <div class="card"><div class="val">%dh %dm</div><div class="lbl">Uptime</div></div>
-      <div class="card"><div class="val">%d</div><div class="lbl">This Session</div></div>
+<div class="dashboard">
+  <header class="dash-header">
+    <div class="dash-header__brand">
+      <div class="dash-header__logo"><i class="lucide-audio-waveform"></i></div>
+      <span class="dash-header__title">Cognitive Flow</span>
     </div>
-    <h3 style="color:#ccd6f6;margin-bottom:12px;font-size:14px">Recent Transcriptions</h3>
-    <table><thead><tr><th>Time</th><th>Text</th><th>Speed</th></tr></thead>
-    <tbody id="dashBody"></tbody>
-    </table>
-  </div>
-
-  <div class="section" id="history">
-    <input class="search" type="text" placeholder="Search transcriptions..." id="histSearch">
-    <table><thead><tr><th>Time</th><th>Text</th><th>Speed</th></tr></thead>
-    <tbody id="histBody"></tbody>
-    </table>
-  </div>
-
-  <div class="section" id="vocab">
-    <p style="color:#8892b0;margin-bottom:16px;font-size:13px">
-      Words the server gets wrong? Add corrections here. These run after every transcription.
-    </p>
-    <div class="vocab-form">
-      <input type="text" id="vocabFrom" placeholder="Wrong word">
-      <input type="text" id="vocabTo" placeholder="Correct word">
-      <button id="vocabAdd">Add</button>
+    <nav class="dash-tabs" role="tablist">
+      <button class="dash-tabs__tab dash-tabs__tab--active" role="tab" aria-selected="true" data-tab="dashboard">Dashboard</button>
+      <button class="dash-tabs__tab" role="tab" aria-selected="false" data-tab="history">History</button>
+      <button class="dash-tabs__tab" role="tab" aria-selected="false" data-tab="vocabulary">Vocabulary</button>
+    </nav>
+    <div class="dash-header__status">
+      <span class="status-dot" id="status-dot"></span>
+      <span class="dash-header__status-text" id="status-text">Server connected</span>
     </div>
-    <table id="vocabTable">
-      <thead><tr><th>From</th><th>To</th><th></th></tr></thead>
-      <tbody id="vocabBody"></tbody>
-    </table>
-  </div>
-</div>
+  </header>
 
-<div class="toast" id="toast"></div>
+  <main class="dash-body">
+    <section class="tab-panel tab-panel--active" id="panel-dashboard" role="tabpanel">
+      <span class="section-label">OVERVIEW</span>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-card__label">TOTAL TRANSCRIPTIONS</span>
+          <span class="stat-card__value stat-card__value--accent" id="stat-total">0</span>
+          <span class="stat-card__meta" id="stat-today">+0 today</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">MINUTES RECORDED</span>
+          <span class="stat-card__value" id="stat-minutes">0</span>
+          <span class="stat-card__meta" id="stat-avg-duration">--</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">AVG SERVER TIME</span>
+          <span class="stat-card__value" id="stat-server">--</span>
+          <span class="stat-card__meta" id="stat-p95">--</span>
+        </div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-card__label">UPTIME</span>
+          <span class="stat-card__value" id="stat-uptime">0m</span>
+          <span class="stat-card__meta" id="stat-started">--</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">SESSION COUNT</span>
+          <span class="stat-card__value" id="stat-sessions">0</span>
+          <span class="stat-card__meta">this session</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">WORD CORRECTIONS</span>
+          <span class="stat-card__value" id="stat-corrections">0</span>
+          <span class="stat-card__meta">active replacements</span>
+        </div>
+      </div>
+      <span class="section-label">RECENT ACTIVITY</span>
+      <div class="activity-list" id="recent-activity"></div>
+    </section>
+
+    <section class="tab-panel" id="panel-history" role="tabpanel">
+      <div class="search-bar">
+        <i class="search-bar__icon lucide-search"></i>
+        <input type="text" class="search-bar__input" id="history-search" placeholder="Search transcriptions..." autocomplete="off">
+      </div>
+      <span class="history-count" id="history-count"></span>
+      <div class="activity-list" id="history-list"></div>
+    </section>
+
+    <section class="tab-panel" id="panel-vocabulary" role="tabpanel">
+      <span class="section-label">ADD CORRECTION</span>
+      <div class="vocab-add">
+        <div class="vocab-add__row">
+          <input type="text" class="vocab-add__input" id="vocab-from" placeholder="Misheard word..." autocomplete="off">
+          <i class="vocab-add__arrow lucide-arrow-right"></i>
+          <input type="text" class="vocab-add__input" id="vocab-to" placeholder="Correct word..." autocomplete="off">
+          <button class="vocab-add__btn" id="vocab-add-btn"><i class="lucide-plus"></i> <span>Add</span></button>
+        </div>
+      </div>
+      <div class="vocab-header">
+        <span class="section-label">ACTIVE CORRECTIONS</span>
+        <span class="vocab-count" id="vocab-count">0 entries</span>
+      </div>
+      <table class="vocab-table" id="vocab-table">
+        <thead><tr><th>FROM</th><th>TO</th><th></th></tr></thead>
+        <tbody id="vocab-tbody"></tbody>
+      </table>
+    </section>
+  </main>
+</div>
+<div class="toast-container" id="toast-container"></div>
 
 <script>
-var historyData = %s;
-var vocabData = %s;
+(function(){
+'use strict';
+var stats = /**STATS**/null;
+var historyData = /**HISTORY**/[];
+var vocabData = /**VOCAB**/{};
 
-// Tabs
-document.querySelectorAll('.tab').forEach(function(t){
-  t.onclick=function(){
-    document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active')});
-    document.querySelectorAll('.section').forEach(function(x){x.classList.remove('active')});
-    t.classList.add('active');
-    document.getElementById(t.dataset.tab).classList.add('active');
-  };
-});
-if(location.hash){
-  var el=document.querySelector('.tab[data-tab="'+location.hash.slice(1)+'"]');
-  if(el) el.click();
-}
-
-function toast(msg){
-  var t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
-  setTimeout(function(){t.classList.remove('show')},1500);
-}
-
+// ---- Helpers ----
+function setText(id, v){ var el=document.getElementById(id); if(el) el.textContent=v; }
 function fmtTime(ts){
-  try{var d=new Date(ts);return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});}
-  catch(e){return ts;}
+  try{ var d=new Date(ts); return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}); }
+  catch(e){ return ts; }
 }
 
-function buildHistRow(entry){
+// ---- Stats ----
+function renderStats(s){
+  if(!s) return;
+  setText('stat-total', s.total.toLocaleString());
+  setText('stat-today', '+'+s.today+' today');
+  setText('stat-minutes', s.minutes.toFixed(1));
+  setText('stat-avg-duration', s.avg_duration > 0 ? '~'+s.avg_duration.toFixed(1)+'s avg duration' : '--');
+  setText('stat-server', s.avg_server > 0 ? s.avg_server+'ms' : '--');
+  setText('stat-p95', s.p95_server > 0 ? 'p95: '+s.p95_server+'ms' : '--');
+  setText('stat-uptime', s.uptime);
+  setText('stat-started', 'started '+s.started);
+  setText('stat-sessions', s.sessions.toString());
+  setText('stat-corrections', s.corrections.toString());
+}
+renderStats(stats);
+
+// ---- Activity Items (createElement, no innerHTML) ----
+function createActivityItem(entry){
+  var div=document.createElement('div');
+  div.className='activity-item';
+  div.setAttribute('data-transcription','');
+
+  var content=document.createElement('div');
+  content.className='activity-item__content';
+
+  var p=document.createElement('p');
+  p.className='activity-item__text';
+  p.textContent=entry.text;
+
+  var meta=document.createElement('span');
+  meta.className='activity-item__meta';
+  meta.textContent=fmtTime(entry.timestamp)+'  |  '+(entry.total_ms||0)+'ms';
+
+  content.appendChild(p);
+  content.appendChild(meta);
+  div.appendChild(content);
+
+  var btn=document.createElement('button');
+  btn.className='activity-item__copy';
+  btn.title='Copy to clipboard';
+  btn.setAttribute('data-copy','');
+  var icon=document.createElement('i');
+  icon.className='lucide-copy';
+  btn.appendChild(icon);
+  div.appendChild(btn);
+
+  return div;
+}
+
+// ---- Recent Activity (last 10) ----
+var recentList=document.getElementById('recent-activity');
+function renderRecent(){
+  while(recentList.firstChild) recentList.removeChild(recentList.firstChild);
+  var items=historyData.slice(0,10);
+  if(items.length===0){
+    var empty=document.createElement('div');
+    empty.className='empty';
+    empty.textContent='No transcriptions yet';
+    recentList.appendChild(empty);
+  } else {
+    items.forEach(function(e){ recentList.appendChild(createActivityItem(e)); });
+  }
+}
+renderRecent();
+
+// ---- History ----
+var histList=document.getElementById('history-list');
+var histCount=document.getElementById('history-count');
+var histSearch=document.getElementById('history-search');
+
+function renderHistory(filter){
+  while(histList.firstChild) histList.removeChild(histList.firstChild);
+  var q=(filter||'').toLowerCase();
+  var visible=0;
+  historyData.forEach(function(e){
+    if(q && e.text.toLowerCase().indexOf(q)===-1) return;
+    histList.appendChild(createActivityItem(e));
+    visible++;
+  });
+  if(visible===0){
+    var empty=document.createElement('div');
+    empty.className='empty';
+    empty.textContent=q?'No results for "'+filter+'"':'No transcriptions yet';
+    histList.appendChild(empty);
+  }
+  histCount.textContent=q
+    ? 'Showing '+visible+' result'+(visible!==1?'s':'')
+    : 'Showing '+historyData.length+' transcriptions';
+}
+renderHistory();
+
+if(histSearch){
+  histSearch.addEventListener('input',function(){ renderHistory(this.value.trim()); });
+}
+
+// ---- Copy to Clipboard ----
+document.addEventListener('click',function(e){
+  var btn=e.target.closest('[data-copy]');
+  if(!btn) return;
+  var item=btn.closest('.activity-item');
+  if(!item) return;
+  var text=item.querySelector('.activity-item__text');
+  if(!text) return;
+  navigator.clipboard.writeText(text.textContent.trim()).then(function(){
+    showToast('success','Copied to clipboard',text.textContent.trim().slice(0,50)+'...');
+  });
+});
+
+// ---- Vocabulary ----
+var vocabFrom=document.getElementById('vocab-from');
+var vocabTo=document.getElementById('vocab-to');
+var vocabAddBtn=document.getElementById('vocab-add-btn');
+var vocabTbody=document.getElementById('vocab-tbody');
+var vocabCountEl=document.getElementById('vocab-count');
+
+function createVocabRow(from, to){
   var tr=document.createElement('tr');
-  tr.className='hist-row';
-  var td1=document.createElement('td');td1.className='ts';td1.textContent=fmtTime(entry.timestamp);
-  var td2=document.createElement('td');td2.className='text-cell';td2.textContent=entry.text;
-  var td3=document.createElement('td');td3.className='ms';td3.textContent=entry.total_ms+'ms';
-  tr.appendChild(td1);tr.appendChild(td2);tr.appendChild(td3);
-  tr.onclick=function(){navigator.clipboard.writeText(entry.text);toast('Copied to clipboard');};
+  var td1=document.createElement('td');
+  td1.className='vocab-table__from';
+  td1.textContent=from;
+  var td2=document.createElement('td');
+  td2.className='vocab-table__to';
+  td2.textContent=to;
+  var td3=document.createElement('td');
+  var btn=document.createElement('button');
+  btn.className='vocab-table__delete';
+  btn.title='Remove correction';
+  btn.setAttribute('data-delete','');
+  btn.setAttribute('data-from',from);
+  var icon=document.createElement('i');
+  icon.className='lucide-x';
+  btn.appendChild(icon);
+  td3.appendChild(btn);
+  tr.appendChild(td1);
+  tr.appendChild(td2);
+  tr.appendChild(td3);
   return tr;
 }
 
-// Render dashboard (last 20)
-var dashBody=document.getElementById('dashBody');
-historyData.slice(0,20).forEach(function(e){dashBody.appendChild(buildHistRow(e));});
-
-// Render full history
-var histBody=document.getElementById('histBody');
-historyData.forEach(function(e){histBody.appendChild(buildHistRow(e));});
-
-// Search
-document.getElementById('histSearch').oninput=function(){
-  var q=this.value.toLowerCase();
-  while(histBody.firstChild) histBody.removeChild(histBody.firstChild);
-  historyData.forEach(function(e){
-    if(e.text.toLowerCase().indexOf(q)!==-1) histBody.appendChild(buildHistRow(e));
-  });
-};
-
-// Vocab rendering
 function renderVocab(data){
-  var body=document.getElementById('vocabBody');
-  while(body.firstChild) body.removeChild(body.firstChild);
-  Object.keys(data).forEach(function(from){
-    var tr=document.createElement('tr');
-    var td1=document.createElement('td');td1.textContent=from;
-    var td2=document.createElement('td');td2.textContent=data[from];
-    var td3=document.createElement('td');
-    var btn=document.createElement('button');btn.className='del-btn';btn.textContent='x';
-    btn.onclick=function(){
-      fetch('/api/vocab/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:from})})
-        .then(function(r){return r.json()}).then(function(d){vocabData=d;renderVocab(d);toast('Removed: '+from);});
-    };
-    td3.appendChild(btn);
-    tr.appendChild(td1);tr.appendChild(td2);tr.appendChild(td3);
-    body.appendChild(tr);
-  });
+  while(vocabTbody.firstChild) vocabTbody.removeChild(vocabTbody.firstChild);
+  var keys=Object.keys(data);
+  keys.forEach(function(from){ vocabTbody.appendChild(createVocabRow(from, data[from])); });
+  vocabCountEl.textContent=keys.length+' entr'+(keys.length===1?'y':'ies');
 }
 renderVocab(vocabData);
 
-document.getElementById('vocabAdd').onclick=function(){
-  var from=document.getElementById('vocabFrom').value.trim();
-  var to=document.getElementById('vocabTo').value.trim();
-  if(!from){toast('Enter a word to replace');return;}
-  fetch('/api/vocab/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:from,to:to})})
-    .then(function(r){return r.json()}).then(function(d){vocabData=d;renderVocab(d);toast('Added: '+from+' -> '+to);});
-  document.getElementById('vocabFrom').value='';
-  document.getElementById('vocabTo').value='';
-};
+if(vocabAddBtn){
+  vocabAddBtn.addEventListener('click',function(){
+    var from=vocabFrom.value.trim();
+    var to=vocabTo.value.trim();
+    if(!from||!to){ showToast('warning','Missing fields','Both fields are required'); return; }
+    fetch('/api/vocab/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:from,to:to})})
+      .then(function(r){return r.json()})
+      .then(function(d){ vocabData=d; renderVocab(d); vocabFrom.value=''; vocabTo.value=''; vocabFrom.focus(); showToast('success','Correction added',from+' \u2192 '+to); });
+  });
+}
+
+[vocabFrom,vocabTo].forEach(function(input){
+  if(!input) return;
+  input.addEventListener('keydown',function(e){ if(e.key==='Enter'){e.preventDefault();vocabAddBtn.click();} });
+});
+
+document.addEventListener('click',function(e){
+  var btn=e.target.closest('[data-delete]');
+  if(!btn) return;
+  var from=btn.getAttribute('data-from');
+  if(!from) return;
+  fetch('/api/vocab/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:from})})
+    .then(function(r){return r.json()})
+    .then(function(d){ vocabData=d; renderVocab(d); showToast('success','Correction removed',from); });
+});
+
+// ---- Tabs ----
+var tabs=document.querySelectorAll('.dash-tabs__tab');
+var panels=document.querySelectorAll('.tab-panel');
+tabs.forEach(function(tab){
+  tab.addEventListener('click',function(){
+    var target=tab.dataset.tab;
+    tabs.forEach(function(t){ t.classList.remove('dash-tabs__tab--active'); t.setAttribute('aria-selected','false'); });
+    tab.classList.add('dash-tabs__tab--active');
+    tab.setAttribute('aria-selected','true');
+    panels.forEach(function(p){ p.classList.remove('tab-panel--active'); });
+    var panel=document.getElementById('panel-'+target);
+    if(panel) panel.classList.add('tab-panel--active');
+    if(target==='history' && histSearch) histSearch.focus();
+  });
+});
+
+// Hash fragment navigation
+if(location.hash){
+  var h=location.hash.slice(1);
+  if(h==='vocab') h='vocabulary';
+  var el=document.querySelector('.dash-tabs__tab[data-tab="'+h+'"]');
+  if(el) el.click();
+}
+
+// ---- Toast Notifications ----
+var toastContainer=document.getElementById('toast-container');
+var toastIcons={success:'lucide-circle-check',warning:'lucide-triangle-alert',error:'lucide-circle-x',info:'lucide-download'};
+
+function showToast(type, title, message, duration){
+  if(!toastContainer) return;
+  duration=duration||3000;
+
+  var toast=document.createElement('div');
+  toast.className='toast toast--'+type;
+
+  var icon=document.createElement('i');
+  icon.className='toast__icon '+(toastIcons[type]||toastIcons.info);
+  toast.appendChild(icon);
+
+  var content=document.createElement('div');
+  content.className='toast__content';
+  var titleEl=document.createElement('span');
+  titleEl.className='toast__title';
+  titleEl.textContent=title;
+  content.appendChild(titleEl);
+  var msgEl=document.createElement('span');
+  msgEl.className='toast__message';
+  msgEl.textContent=message;
+  content.appendChild(msgEl);
+  toast.appendChild(content);
+
+  toastContainer.appendChild(toast);
+  requestAnimationFrame(function(){ toast.classList.add('toast--visible'); });
+  setTimeout(function(){
+    toast.classList.remove('toast--visible');
+    toast.addEventListener('transitionend',function(){ toast.remove(); },{once:true});
+  },duration);
+}
+
+// ---- Server Status Check ----
+function checkServer(){
+  fetch('/api/stats').then(function(r){
+    var dot=document.getElementById('status-dot');
+    var text=document.getElementById('status-text');
+    if(r.ok){ dot.classList.remove('status-dot--error'); text.textContent='Server connected'; }
+    else { dot.classList.add('status-dot--error'); text.textContent='Server error'; }
+  }).catch(function(){
+    var dot=document.getElementById('status-dot');
+    var text=document.getElementById('status-text');
+    dot.classList.add('status-dot--error');
+    text.textContent='Disconnected';
+  });
+}
+setInterval(checkServer,30000);
+
+})();
 </script>
 </body>
 </html>`
@@ -1925,14 +2278,14 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			level := audioLevel.Load()
 			switch {
 			case level < 15:
-				color = 0x003643F4 // Red dim
+				color = 0x00775A11 // Cyan dim
 			case level < 50:
-				color = 0x002030F4 // Red bright
+				color = 0x00BB9317 // Cyan medium
 			default:
-				color = 0x001020FF // Red hot
+				color = 0x00EED322 // Cyan full (#22D3EE)
 			}
 		case phaseProcessing:
-			color = 0x0000BFFF // Amber
+			color = 0x0008B3EA // Amber (#EAB308)
 		default:
 			color = 0
 		}
@@ -2038,10 +2391,10 @@ var ind struct {
 type indColor struct{ r, g, b float64 }
 
 var (
-	colGreen = indColor{76, 175, 80}
-	colRed   = indColor{229, 57, 53}
-	colAmber = indColor{251, 176, 59}
-	colGray  = indColor{120, 120, 120}
+	colCyan    = indColor{34, 211, 238}  // #22D3EE - accent cyan
+	colCyanDim = indColor{17, 106, 119} // 50% cyan for recording pulse
+	colAmber   = indColor{234, 179, 8}  // #EAB308 - processing
+	colGray    = indColor{120, 120, 120}
 )
 
 var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
@@ -2336,7 +2689,7 @@ func renderIndicator() {
 		glowR = indGlowMin
 		glowAlpha = 0.15
 	case p == phaseRecording:
-		col = colRed
+		col = colCyan
 		level := float64(audioLevel.Load()) / 100.0
 		glowR = indGlowMin + level*(indGlowMax-indGlowMin)
 		glowAlpha = 0.25 + level*0.35
@@ -2347,7 +2700,7 @@ func renderIndicator() {
 		glowAlpha = 0.3
 		pulse = 0.8 + 0.2*math.Sin(float64(ind.frame)*0.12)
 	default:
-		col = colGreen
+		col = colCyan
 		glowR = indGlowMin
 		glowAlpha = 0.2
 	}
@@ -2583,7 +2936,7 @@ func createTray() {
 	tip, _ := syscall.UTF16FromString(fmt.Sprintf("Cognitive Flow v%s", version))
 	copy(state.trayNID.Tip[:], tip)
 
-	state.trayIcon = makeIcon(76, 175, 80) // Green
+	state.trayIcon = makeIcon(34, 211, 238) // Cyan (#22D3EE)
 	state.trayNID.Icon = state.trayIcon
 
 	pShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&state.trayNID)))
@@ -2691,11 +3044,11 @@ func updateTrayIcon() {
 	var r, g, b byte
 	switch currentPhase() {
 	case phaseRecording:
-		r, g, b = 244, 67, 54
+		r, g, b = 34, 211, 238 // Cyan (#22D3EE)
 	case phaseProcessing:
-		r, g, b = 255, 191, 0
+		r, g, b = 234, 179, 8 // Amber (#EAB308)
 	default:
-		r, g, b = 76, 175, 80
+		r, g, b = 34, 211, 238 // Cyan (#22D3EE)
 	}
 
 	old := state.trayIcon
