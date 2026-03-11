@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.9.5
+- Shared HTTP client with keep-alive for speech server (reuses TCP connections between warmup and transcription)
+- Per-request timeout 5s (was 10s) - LAN responses are always <500ms when healthy
+
 ## v2.9.4
 - Always show expanded mic circle indicator (removed collapse-to-dot behavior)
 

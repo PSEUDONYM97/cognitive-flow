@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -177,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.4"
+	version = "2.9.5"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -538,6 +539,17 @@ const (
 	appCmdMediaPlay  = 46 // directional: only plays, never pauses
 	appCmdMediaPause = 47 // directional: only pauses, never plays
 )
+
+// Shared HTTP client for speech server - keeps TCP connections alive between
+// healthCheck() warmup and transcribe() POST so we don't re-establish TCP each time.
+var sttClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        2,
+		IdleConnTimeout:     120 * time.Second,
+		DisableKeepAlives:   false,
+	},
+}
 
 var (
 	mediaPaused bool // true if WE paused and should resume
@@ -1771,11 +1783,11 @@ done:
 // ----- Server communication -----
 
 func healthCheck() error {
-	c := &http.Client{Timeout: 5 * time.Second}
-	resp, err := c.Get(cfg.Server + "/health")
+	resp, err := sttClient.Get(cfg.Server + "/health")
 	if err != nil {
 		return err
 	}
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	return nil
 }
@@ -1811,18 +1823,20 @@ func transcribe(samples []int16, clipboard bool) {
 			time.Sleep(delays[attempt-1])
 		}
 
-		c := &http.Client{Timeout: 10 * time.Second}
-		req, _ := http.NewRequest("POST", cfg.Server+"/transcribe", bytes.NewReader(payload))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, "POST", cfg.Server+"/transcribe", bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 
-		resp, err := c.Do(req)
+		resp, err := sttClient.Do(req)
 		if err != nil {
+			cancel()
 			lastErr = err
 			continue
 		}
 
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		cancel()
 
 		if resp.StatusCode != 200 {
 			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
