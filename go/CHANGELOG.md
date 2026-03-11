@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.9.2
+- Resume media immediately when recording stops (don't wait for transcription to finish)
+- Tighter HTTP timeouts for LAN: 10s per attempt (was 30s), retry delays 2/4/8s (was 5/10/15s)
+
+## v2.9.1
+- Media pause: switch back to SendInput (VK_MEDIA_PLAY_PAUSE) which goes through proper
+  keyboard -> shell -> SMTC routing that Chrome responds to. WM_APPCOMMAND didn't reach it.
+- Audio detection guard (fixed in v2.8.3) prevents accidental starts from the toggle key
+
+## v2.9.0
+- Indicator redesign: 4 distinct visual states matching design mockups
+  - Idle collapsed: 16px cyan dot at 40% opacity
+  - Idle expanded: 56px dark circle (#1E293B) with 2px cyan border + procedural mic icon
+  - Recording: 80px pulsing ring + 64px solid cyan core + dark mic icon
+  - Processing: 56px dark circle with 3px cyan border + spinning dots loader
+- Smooth animated transitions between collapsed dot and expanded circle
+- Anti-aliased rendering with proper src-over compositing
+- Mic icon drawn procedurally (capsule + cradle arc + stem + base)
+- 96px window buffer to accommodate recording pulse animation
+
 ## v2.8.3
 - Fix IID_IMMDeviceEnumerator GUID (was wrong since initial implementation, audio detection never worked)
 - isAudioPlaying() now correctly detects system audio via WASAPI peak meter

@@ -177,7 +177,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.8.3"
+	version = "2.9.2"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -642,9 +642,14 @@ func pauseMedia() {
 		log("No audio playing, skipping pause")
 		return
 	}
-	sendAppCommand(appCmdMediaPause)
+	// SendInput with VK_MEDIA_PLAY_PAUSE goes through the keyboard -> shell -> SMTC
+	// routing that Chrome/Spotify actually respond to. WM_APPCOMMAND sent directly
+	// to windows doesn't reliably reach the media session handler.
+	// The isAudioPlaying() guard above prevents accidental starts (only fires when
+	// audio IS playing, so the toggle always means "pause").
+	sendKey(0xB3, keyeventfExtended) // VK_MEDIA_PLAY_PAUSE
 	mediaPaused = true
-	log("Media paused (directional)")
+	log("Media paused (SendInput)")
 }
 
 func resumeMedia() {
@@ -652,8 +657,8 @@ func resumeMedia() {
 		return
 	}
 	mediaPaused = false
-	sendAppCommand(appCmdMediaPlay)
-	log("Media resumed (directional)")
+	sendKey(0xB3, keyeventfExtended) // VK_MEDIA_PLAY_PAUSE
+	log("Media resumed (SendInput)")
 }
 
 // ----- Recording flow -----
@@ -751,7 +756,6 @@ func startRecording() {
 
 	// Goroutine to receive frames when recording stops
 	go func() {
-		defer resumeMedia() // always unpause media when pipeline finishes
 		defer func() {
 			if r := recover(); r != nil {
 				log("PANIC in transcription pipeline: %v", r)
@@ -788,6 +792,7 @@ func stopRecording() {
 	}
 	log("Stopped")
 	state.recording = false
+	resumeMedia() // resume immediately on stop, don't wait for transcription
 
 	// Signal capture loop to stop, then stop the device
 	if audio.stopCh != nil {
@@ -1797,7 +1802,7 @@ func transcribe(samples []int16, clipboard bool) {
 		Ms   float64 `json:"processing_time_ms"`
 	}
 
-	delays := [3]time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second}
+	delays := [3]time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
 	var lastErr error
 
 	for attempt := 0; attempt <= 3; attempt++ {
@@ -1806,7 +1811,7 @@ func transcribe(samples []int16, clipboard bool) {
 			time.Sleep(delays[attempt-1])
 		}
 
-		c := &http.Client{Timeout: 30 * time.Second}
+		c := &http.Client{Timeout: 10 * time.Second}
 		req, _ := http.NewRequest("POST", cfg.Server+"/transcribe", bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 
@@ -2357,14 +2362,16 @@ func createBar() {
 }
 
 // ----- Per-pixel alpha indicator -----
-// Software-rendered overlay with anti-aliased dot, glow, and pulsing.
+// Software-rendered overlay indicator with 4 visual states:
+//   Idle collapsed:  16px cyan dot at 40% opacity
+//   Idle expanded:   56px dark circle with cyan border + mic icon
+//   Recording:       80px pulsing ring + 64px cyan core + mic icon
+//   Processing:      56px dark circle with cyan border + spinning dots
 // Uses UpdateLayeredWindow for true per-pixel transparency.
 
 const (
-	indSize       = 56            // window size
-	indDotRadius  = 10.0          // dot radius in pixels
-	indGlowMin    = 13.0          // minimum glow radius
-	indGlowMax    = 24.0          // maximum glow radius (loud audio)
+	indSize       = 96            // window pixel buffer (fits 80px recording + pulse margin)
+	indCenter     = 48            // center of the window
 	timerIndAnim  = 3             // animation timer ID
 	ulwAlpha      = 0x00000002    // ULW_ALPHA flag
 	wmLButtonDown = 0x0201
@@ -2391,9 +2398,9 @@ var ind struct {
 type indColor struct{ r, g, b float64 }
 
 var (
-	colCyan    = indColor{34, 211, 238}  // #22D3EE - accent cyan
-	colCyanDim = indColor{17, 106, 119} // 50% cyan for recording pulse
-	colAmber   = indColor{234, 179, 8}  // #EAB308 - processing
+	colCyan    = indColor{34, 211, 238}  // #22D3EE
+	colBgCard  = indColor{30, 41, 59}    // #1E293B - dark circle fill
+	colDark    = indColor{10, 15, 28}    // #0A0F1C - icon on cyan background
 	colGray    = indColor{120, 120, 120}
 )
 
@@ -2528,8 +2535,9 @@ func createIndicator() {
 
 	sw, _, _ := pGetSystemMetrics.Call(0)
 	sh, _, _ := pGetSystemMetrics.Call(1)
-	x := int(sw) - indSize - 24
-	y := int(sh) - indSize - 64
+	// Position so the visual center lands where the old 56px indicator's center was
+	x := int(sw) - indSize - 4
+	y := int(sh) - indSize - 44
 
 	hwnd, _, _ := pCreateWindowEx.Call(
 		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate,
@@ -2671,102 +2679,373 @@ func initDistTable() {
 func renderIndicator() {
 	w := indSize
 	px := ind.pixels
+	cx := float64(indCenter)
+	cy := float64(indCenter)
 
 	// Clear to fully transparent
 	for i := range px {
 		px[i] = 0
 	}
 
-	// Determine dot color and glow based on state
 	p := currentPhase()
-	var col indColor
-	var glowR, glowAlpha float64
-	var pulse float64 = 1.0
-
-	switch {
-	case !state.enabled:
-		col = colGray
-		glowR = indGlowMin
-		glowAlpha = 0.15
-	case p == phaseRecording:
-		col = colCyan
-		level := float64(audioLevel.Load()) / 100.0
-		glowR = indGlowMin + level*(indGlowMax-indGlowMin)
-		glowAlpha = 0.25 + level*0.35
-		pulse = 0.65 + 0.35*math.Sin(float64(ind.frame)*0.21)
-	case p == phaseProcessing:
-		col = colAmber
-		glowR = indGlowMin + 2
-		glowAlpha = 0.3
-		pulse = 0.8 + 0.2*math.Sin(float64(ind.frame)*0.12)
-	default:
-		col = colCyan
-		glowR = indGlowMin
-		glowAlpha = 0.2
-	}
-
-	// Collapse fade: modulate glow and dot opacity when idle
-	// fadeLevel 1.0 = full presence, 0.0 = subtle dot only
 	fl := ind.fadeLevel
-	if fl < 1.0 && p == phaseIdle {
-		// Reduce glow but keep the dot clearly visible
-		glowAlpha *= 0.3 + 0.7*fl
-		// Keep dot center at minimum 60% so it's always visible and hittable
-		pulse *= 0.6 + 0.4*fl
+
+	// ---- Collapsed idle: tiny cyan dot ----
+	if p == phaseIdle && fl < 0.05 && !ind.hovered {
+		dotR := 8.0 // 16px diameter
+		for idx := 0; idx < w*w; idx++ {
+			dist := ind.dist[idx]
+			if dist > dotR+1 {
+				continue
+			}
+			a := 0.4 * aaEdge(dotR, dist)
+			if a > 0.004 {
+				i := idx * 4
+				px[i+0] = byte(colCyan.b * a)
+				px[i+1] = byte(colCyan.g * a)
+				px[i+2] = byte(colCyan.r * a)
+				px[i+3] = byte(255 * a)
+			}
+		}
+		updateIndicatorWindow()
+		return
 	}
 
-	// Single pass using precomputed distance table. Zero sqrt calls.
-	// Dot and glow share the same color, so alpha compositing simplifies to
-	// just combining the two alpha values: oA = dotA + glowA*(1-dotA).
-	dotInner := indDotRadius - 0.5
-	dotOuter := indDotRadius + 0.5
+	// ---- Recording: pulse ring + cyan core + mic icon ----
+	if p == phaseRecording {
+		level := float64(audioLevel.Load()) / 100.0
+		pulse := 0.65 + 0.35*math.Sin(float64(ind.frame)*0.10)
+
+		// Pulse ring: 80px outer, breathing
+		pulseR := 40.0 + 2.0*math.Sin(float64(ind.frame)*0.10)
+		pulseAlpha := 0.12 + 0.08*math.Sin(float64(ind.frame)*0.10) + level*0.1
+		coreR := 32.0 // 64px diameter inner core
+		_ = pulse
+
+		for idx := 0; idx < w*w; idx++ {
+			dist := ind.dist[idx]
+			if dist > pulseR+1 {
+				continue
+			}
+
+			py := idx / w
+			ppx := idx % w
+			dx := float64(ppx) - cx + 0.5
+			dy := float64(py) - cy + 0.5
+
+			var r, g, b, a float64
+
+			// Layer 1: Pulse ring (between core and outer)
+			if dist > coreR+0.5 && dist < pulseR+1 {
+				t := (dist - coreR) / (pulseR - coreR)
+				ringA := pulseAlpha * (1 - t*t) * aaEdge(pulseR, dist)
+				r = colCyan.r / 255 * ringA
+				g = colCyan.g / 255 * ringA
+				b = colCyan.b / 255 * ringA
+				a = ringA
+			}
+
+			// Layer 2: Solid cyan core
+			if dist < coreR+0.5 {
+				coreA := aaEdge(coreR, dist)
+				compositeOver(&r, &g, &b, &a, colCyan.r/255, colCyan.g/255, colCyan.b/255, coreA)
+			}
+
+			// Layer 3: Mic icon (dark on cyan)
+			micA := micIconAlpha(dx, dy, 1.3)
+			if micA > 0.01 {
+				compositeOver(&r, &g, &b, &a, colDark.r/255, colDark.g/255, colDark.b/255, micA)
+			}
+
+			if a > 0.004 {
+				i := idx * 4
+				px[i+0] = clampByte(b * 255)
+				px[i+1] = clampByte(g * 255)
+				px[i+2] = clampByte(r * 255)
+				px[i+3] = clampByte(a * 255)
+			}
+		}
+		updateIndicatorWindow()
+		return
+	}
+
+	// ---- Processing: dark circle + cyan border + spinning dots ----
+	if p == phaseProcessing {
+		circleR := 28.0 // 56px diameter
+		borderW := 3.0
+
+		for idx := 0; idx < w*w; idx++ {
+			dist := ind.dist[idx]
+			if dist > circleR+1 {
+				continue
+			}
+
+			py := idx / w
+			ppx := idx % w
+			dx := float64(ppx) - cx + 0.5
+			dy := float64(py) - cy + 0.5
+
+			var r, g, b, a float64
+
+			// Dark fill
+			fillR := circleR - borderW
+			if dist < fillR+0.5 {
+				fillA := aaEdge(fillR, dist)
+				r = colBgCard.r / 255 * fillA
+				g = colBgCard.g / 255 * fillA
+				b = colBgCard.b / 255 * fillA
+				a = fillA
+			}
+
+			// Cyan border
+			if dist > fillR-0.5 && dist < circleR+0.5 {
+				outerAA := aaEdge(circleR, dist)
+				innerAA := 1.0 - aaEdge(fillR, dist)
+				bdrA := outerAA * innerAA
+				if bdrA > 0.01 {
+					compositeOver(&r, &g, &b, &a, colCyan.r/255, colCyan.g/255, colCyan.b/255, bdrA)
+				}
+			}
+
+			// Spinner dots
+			spinA := spinnerAlpha(dx, dy, 1.0, ind.frame)
+			if spinA > 0.01 {
+				compositeOver(&r, &g, &b, &a, colCyan.r/255, colCyan.g/255, colCyan.b/255, spinA)
+			}
+
+			if a > 0.004 {
+				i := idx * 4
+				px[i+0] = clampByte(b * 255)
+				px[i+1] = clampByte(g * 255)
+				px[i+2] = clampByte(r * 255)
+				px[i+3] = clampByte(a * 255)
+			}
+		}
+		updateIndicatorWindow()
+		return
+	}
+
+	// ---- Idle expanded (or transitioning): dark circle + cyan border + mic ----
+	// fl interpolates from collapsed dot (0) to full expanded circle (1)
+	circleR := 8.0 + 20.0*fl // 8 (dot) -> 28 (56px circle)
+	borderW := 2.0 * fl
+	fillAlpha := fl // dark fill fades in
+	borderAlpha := fl
+	iconAlpha := math.Max(0, (fl-0.3)/0.7) // icon fades in during last 70% of transition
+
+	// Disabled state: gray dot
+	if !state.enabled {
+		circleR = 8.0
+		borderW = 0
+		fillAlpha = 0
+		iconAlpha = 0
+	}
 
 	for idx := 0; idx < w*w; idx++ {
 		dist := ind.dist[idx]
-		if dist >= glowR {
+		if dist > circleR+1 {
 			continue
 		}
 
-		var a float64
+		py := idx / w
+		ppx := idx % w
+		dx := float64(ppx) - cx + 0.5
+		dy := float64(py) - cy + 0.5
 
-		if dist < dotInner {
-			// Fully inside dot
-			a = pulse
-		} else if dist < dotOuter {
-			// AA edge of dot, composite with underlying glow
-			dotA := pulse * (1.0 - (dist - dotInner))
-			glowT := (dist - indDotRadius) / (glowR - indDotRadius)
-			if glowT < 0 {
-				glowT = 0
-			}
-			glowA := (1 - glowT*glowT) * glowAlpha * pulse
-			a = dotA + glowA*(1-dotA) // src-over (same color = trivial)
+		var r, g, b, a float64
+
+		fillR := circleR - borderW
+		if fillR < 0 {
+			fillR = 0
+		}
+
+		// During transition: blend from cyan dot to dark filled circle
+		if fillAlpha < 0.5 {
+			// Mostly collapsed: draw cyan dot
+			dotA := (0.4 + 0.6*fl) * aaEdge(circleR, dist)
+			r = colCyan.r / 255 * dotA
+			g = colCyan.g / 255 * dotA
+			b = colCyan.b / 255 * dotA
+			a = dotA
 		} else {
-			// Pure glow
-			t := (dist - indDotRadius) / (glowR - indDotRadius)
-			a = (1 - t*t) * glowAlpha * pulse
+			// Dark fill
+			if dist < fillR+0.5 {
+				fA := fillAlpha * aaEdge(fillR, dist)
+				r = colBgCard.r / 255 * fA
+				g = colBgCard.g / 255 * fA
+				b = colBgCard.b / 255 * fA
+				a = fA
+			}
+			// Cyan border
+			if borderW > 0.5 && dist > fillR-0.5 && dist < circleR+0.5 {
+				outerAA := aaEdge(circleR, dist)
+				innerAA := 1.0 - aaEdge(fillR, dist)
+				bdrA := borderAlpha * outerAA * innerAA
+				if bdrA > 0.01 {
+					compositeOver(&r, &g, &b, &a, colCyan.r/255, colCyan.g/255, colCyan.b/255, bdrA)
+				}
+			}
+		}
+
+		// Mic icon
+		if iconAlpha > 0.01 {
+			micA := micIconAlpha(dx, dy, 1.0) * iconAlpha
+			if micA > 0.01 {
+				compositeOver(&r, &g, &b, &a, colCyan.r/255, colCyan.g/255, colCyan.b/255, micA)
+			}
 		}
 
 		if a > 0.004 {
 			i := idx * 4
-			px[i+0] = byte(col.b * a)
-			px[i+1] = byte(col.g * a)
-			px[i+2] = byte(col.r * a)
-			px[i+3] = byte(255 * a)
+			px[i+0] = clampByte(b * 255)
+			px[i+1] = clampByte(g * 255)
+			px[i+2] = clampByte(r * 255)
+			px[i+3] = clampByte(a * 255)
 		}
 	}
+	updateIndicatorWindow()
+}
 
-	// Push to screen via UpdateLayeredWindow
+func updateIndicatorWindow() {
 	srcPt := [2]int32{0, 0}
-	sz := [2]int32{int32(w), int32(w)}
+	sz := [2]int32{int32(indSize), int32(indSize)}
 	blend := uint32(0) | uint32(0)<<8 | uint32(255)<<16 | uint32(1)<<24
 	pUpdateLayeredWindow.Call(
 		ind.hwnd, 0, 0, uintptr(unsafe.Pointer(&sz)),
 		ind.memDC, uintptr(unsafe.Pointer(&srcPt)),
 		0, uintptr(unsafe.Pointer(&blend)), ulwAlpha,
 	)
-
 	ind.frame++
+}
+
+// aaEdge returns 0-1 anti-aliased edge alpha. 1.0 inside, 0.0 outside, smooth at boundary.
+func aaEdge(radius, dist float64) float64 {
+	if dist < radius-0.5 {
+		return 1.0
+	}
+	if dist > radius+0.5 {
+		return 0.0
+	}
+	return radius + 0.5 - dist
+}
+
+// compositeOver does premultiplied-alpha src-over compositing in-place.
+func compositeOver(dR, dG, dB, dA *float64, sR, sG, sB, sA float64) {
+	pr := sR * sA
+	pg := sG * sA
+	pb := sB * sA
+	inv := 1.0 - sA
+	*dR = pr + *dR*inv
+	*dG = pg + *dG*inv
+	*dB = pb + *dB*inv
+	*dA = sA + *dA*inv
+}
+
+func clampByte(v float64) byte {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
+}
+
+// micIconAlpha returns 0-1 alpha for drawing a mic icon at (dx, dy) from icon center.
+// scale 1.0 = 22px reference, 1.3 = 28px (recording state).
+func micIconAlpha(dx, dy, scale float64) float64 {
+	// Normalize to 22px reference space
+	x := dx / scale
+	y := dy / scale
+
+	// Mic capsule (stadium/pill shape) - centered, upper portion
+	capCY := -3.0  // center offset (shifted up)
+	capHW := 2.8   // half-width
+	capHH := 5.0   // half-height
+	capR := capHW   // corner radius = width (fully rounded)
+
+	cdy := y - capCY
+	straight := capHH - capR
+	clamped := math.Max(-straight, math.Min(straight, cdy))
+	d := math.Sqrt(x*x + (cdy-clamped)*(cdy-clamped))
+	if d < capR+0.7 {
+		return smoothstep(capR+0.7, capR-0.3, d)
+	}
+
+	// U-arc (cradle) - semicircular stroke below capsule
+	arcCY := capCY + capHH + 1.5
+	arcR := 4.5
+	arcThick := 1.4
+	arcDist := math.Sqrt(x*x + (y-arcCY)*(y-arcCY))
+	ringDist := math.Abs(arcDist - arcR)
+	if y > arcCY-0.5 && ringDist < arcThick/2+0.7 {
+		return smoothstep(arcThick/2+0.7, arcThick/2-0.3, ringDist)
+	}
+
+	// Stem - vertical line below arc
+	stemTop := arcCY + arcR
+	stemBot := stemTop + 2.5
+	stemHW := 0.7
+	if y > stemTop-0.3 && y < stemBot+0.5 {
+		xd := math.Max(0, math.Abs(x)-stemHW)
+		yd := math.Max(0, math.Max(stemTop-y, y-stemBot))
+		d := math.Sqrt(xd*xd + yd*yd)
+		if d < 0.7 {
+			return smoothstep(0.7, 0, d)
+		}
+	}
+
+	// Base - horizontal line at bottom
+	baseCY := stemBot
+	baseHW := 3.0
+	baseHH := 0.7
+	if math.Abs(y-baseCY) < baseHH+0.7 && math.Abs(x) < baseHW+0.7 {
+		xd := math.Max(0, math.Abs(x)-baseHW)
+		yd := math.Max(0, math.Abs(y-baseCY)-baseHH)
+		d := math.Sqrt(xd*xd + yd*yd)
+		if d < 0.7 {
+			return smoothstep(0.7, 0, d)
+		}
+	}
+
+	return 0
+}
+
+// spinnerAlpha returns 0-1 alpha for a spinning dots loader icon.
+// 8 dots in a circle, varying opacity to create rotation effect.
+func spinnerAlpha(dx, dy, scale float64, frame int) float64 {
+	dotR := 1.8 * scale   // dot radius
+	ringR := 8.0 * scale  // ring radius
+	ndots := 8
+	rotAngle := float64(frame) * 0.15
+
+	for i := 0; i < ndots; i++ {
+		a := float64(i)*2*math.Pi/float64(ndots) + rotAngle
+		dotCX := ringR * math.Cos(a)
+		dotCY := ringR * math.Sin(a)
+
+		ddx := dx - dotCX
+		ddy := dy - dotCY
+		d := math.Sqrt(ddx*ddx + ddy*ddy)
+
+		if d < dotR+0.7 {
+			opacity := 0.15 + 0.85*float64(i)/float64(ndots-1) // trailing=dim, leading=bright
+			return smoothstep(dotR+0.7, dotR-0.3, d) * opacity
+		}
+	}
+	return 0
+}
+
+// smoothstep returns 0-1 with smooth interpolation between edge0 and edge1.
+func smoothstep(edge0, edge1, x float64) float64 {
+	t := (x - edge0) / (edge1 - edge0)
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	return t * t * (3 - 2*t)
 }
 
 func setPhase(p int32) {
