@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.9.4
+- Always show expanded mic circle indicator (removed collapse-to-dot behavior)
+
 ## v2.9.3
 - Millisecond precision in all log timestamps (was second-level)
 - Log typing duration separately (chars + ms)

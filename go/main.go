@@ -177,7 +177,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.3"
+	version = "2.9.4"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -2473,37 +2473,10 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 
 	case wmTimer:
 		if wp == timerIndAnim {
-			// Collapse after 3s idle
 			p := currentPhase()
-			if p == phaseIdle && !ind.collapseAt.IsZero() && time.Now().After(ind.collapseAt) {
-				ind.collapsed = true
-				ind.collapseAt = time.Time{} // clear
-				// Speed up timer for smooth fade-out animation
-				pSetTimer.Call(hwnd, timerIndAnim, 66, 0)
-			}
 
-			// Smooth fade: target 1.0 when expanded/hovered, 0.0 when collapsed
-			target := 0.0
-			if !ind.collapsed || ind.hovered || p != phaseIdle {
-				target = 1.0
-			}
-			animating := false
-			if ind.fadeLevel < target {
-				ind.fadeLevel += 0.25 // ~4 frames to full
-				if ind.fadeLevel > 1.0 {
-					ind.fadeLevel = 1.0
-				}
-				animating = ind.fadeLevel < target
-			} else if ind.fadeLevel > target {
-				ind.fadeLevel -= 0.04 // ~25 frames to collapse (slower fade out)
-				if ind.fadeLevel < 0.0 {
-					ind.fadeLevel = 0.0
-				}
-				animating = ind.fadeLevel > target
-			}
-
-			// Slow timer back to 1s when done animating and idle
-			if !animating && p == phaseIdle && !ind.hovered {
+			// Slow timer back to 1s when idle
+			if p == phaseIdle && !ind.hovered {
 				pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
 			}
 
@@ -2574,7 +2547,6 @@ func createIndicator() {
 
 	initDistTable()
 	ind.fadeLevel = 1.0
-	ind.collapseAt = time.Now().Add(3 * time.Second) // collapse 3s after startup
 	renderIndicator()
 	pShowWindow.Call(hwnd, 8) // SW_SHOWNA
 	state.indVisible = true
@@ -3089,8 +3061,8 @@ func applyPhase(p int32) {
 	default:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
-		// Start 3s collapse countdown
-		ind.collapseAt = time.Now().Add(3 * time.Second)
+		ind.collapsed = false
+		ind.fadeLevel = 1.0
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
 		// Back to slow heartbeat when idle.
 		// Don't call renderIndicator() - it's cross-window GDI from bar's wndproc.
