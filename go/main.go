@@ -177,7 +177,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.2"
+	version = "2.9.3"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -1877,10 +1877,13 @@ func transcribe(samples []int16, clipboard bool) {
 		copyToClipboard(text)
 		log("Copied to clipboard")
 	} else {
+		typeStart := time.Now()
 		if err := typeText(text + " "); err != nil {
 			log("SendInput failed: %v - copying to clipboard", err)
 			copyToClipboard(text)
 			notify("Typed via clipboard", "SendInput failed, text copied instead")
+		} else {
+			log("Typed %d chars in %dms", len(text), time.Since(typeStart).Milliseconds())
 		}
 	}
 
@@ -3406,10 +3409,11 @@ func initLog() {
 }
 
 func log(f string, a ...interface{}) {
-	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(f, a...))
+	now := time.Now()
+	line := fmt.Sprintf("[%s] %s\n", now.Format("15:04:05.000"), fmt.Sprintf(f, a...))
 	fmt.Print(line)
 	if logFile != nil {
-		logFile.WriteString(time.Now().Format("2006-01-02 ") + line)
+		logFile.WriteString(now.Format("2006-01-02 ") + line)
 	}
 }
 

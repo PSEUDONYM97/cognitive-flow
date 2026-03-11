@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.9.3
+- Millisecond precision in all log timestamps (was second-level)
+- Log typing duration separately (chars + ms)
+
 ## v2.9.2
 - Resume media immediately when recording stops (don't wait for transcription to finish)
 - Tighter HTTP timeouts for LAN: 10s per attempt (was 30s), retry delays 2/4/8s (was 5/10/15s)
