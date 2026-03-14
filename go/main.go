@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.6"
+	version = "2.9.7"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -2521,6 +2521,14 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			}()
 		}
 		ind.dragging = false
+		return 0
+
+	case wmRButtonUp:
+		// Right-click: copy last transcription to clipboard
+		if state.lastOutput != "" {
+			copyToClipboard(state.lastOutput)
+			log("Copied last output to clipboard")
+		}
 		return 0
 
 	case wmTimer:

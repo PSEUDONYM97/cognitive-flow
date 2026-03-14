@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.9.7
+- Right-click indicator to copy last transcription to clipboard
+
 ## v2.9.6
 - Normalize saved audio to ~80% peak for listenable playback (raw mic input was ~10% peak)
 
