@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.9"
+	version = "2.10.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -2347,22 +2347,25 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 
 		switch p {
 		case phaseRecording:
+			// VU meter: bar width scales with audio level, centered on screen
 			level := audioLevel.Load()
-			switch {
-			case level < 15:
-				color = 0x00775A11 // Cyan dim
-			case level < 50:
-				color = 0x00BB9317 // Cyan medium
-			default:
-				color = 0x00EED322 // Cyan full (#22D3EE)
+			if level < 3 {
+				level = 3 // minimum visible sliver so you know it's recording
 			}
+			w := int32(sw) * level / 100
+			x := (int32(sw) - w) / 2
+			// Brighter when louder
+			t := float64(level) / 100.0
+			cr := byte(17 + t*17)    // 0x11 -> 0x22
+			cg := byte(147 + t*64)   // 0x93 -> 0xD3
+			cb := byte(187 + t*51)   // 0xBB -> 0xEE
+			color = uintptr(cb)<<16 | uintptr(cg)<<8 | uintptr(cr) // BGR
+			brush, _, _ := pCreateSolidBrush.Call(color)
+			r := [4]int32{x, 0, x + w, barHeight}
+			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
+			pDeleteObject.Call(brush)
 		case phaseProcessing:
 			color = 0x0008B3EA // Amber (#EAB308)
-		default:
-			color = 0
-		}
-
-		if color != 0 {
 			brush, _, _ := pCreateSolidBrush.Call(color)
 			r := [4]int32{0, 0, int32(sw), barHeight}
 			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
@@ -2761,13 +2764,11 @@ func renderIndicator() {
 	// ---- Recording: pulse ring + cyan core + mic icon ----
 	if p == phaseRecording {
 		level := float64(audioLevel.Load()) / 100.0
-		pulse := 0.65 + 0.35*math.Sin(float64(ind.frame)*0.10)
 
-		// Pulse ring: 80px outer, breathing
-		pulseR := 40.0 + 2.0*math.Sin(float64(ind.frame)*0.10)
-		pulseAlpha := 0.12 + 0.08*math.Sin(float64(ind.frame)*0.10) + level*0.1
-		coreR := 32.0 // 64px diameter inner core
-		_ = pulse
+		// Core and ring scale with audio level
+		coreR := 24.0 + 10.0*level  // 24px quiet -> 34px loud (48-68px diameter)
+		pulseR := coreR + 6.0 + 4.0*level + 2.0*math.Sin(float64(ind.frame)*0.10)
+		pulseAlpha := 0.10 + 0.20*level + 0.05*math.Sin(float64(ind.frame)*0.10)
 
 		for idx := 0; idx < w*w; idx++ {
 			dist := ind.dist[idx]

@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.10.0
+- VU meter status bar: width and brightness scale with audio level, centered on screen
+- Indicator pulses with voice: core radius grows 24-34px based on audio level, ring follows
+
 ## v2.9.9
 - Auto-scaling audio level meter (adapts to any mic gain, no hardcoded multiplier)
 
