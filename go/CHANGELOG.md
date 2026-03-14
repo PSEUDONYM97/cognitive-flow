@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.9.9
+- Auto-scaling audio level meter (adapts to any mic gain, no hardcoded multiplier)
+
 ## v2.9.8
 - 8x gain on audio level meter so recording indicator visually responds to speech
 

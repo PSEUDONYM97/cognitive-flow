@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.8"
+	version = "2.9.9"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -1714,6 +1714,7 @@ func captureLoop(hwi, event uintptr, hdrs *[numBufs]wavehdr, bufs *[numBufs][]by
 		}
 	}()
 	var frames []int16
+	var peakRMS float64 // adaptive gain: tracks loudest RMS seen
 
 	for {
 		select {
@@ -1743,9 +1744,20 @@ func captureLoop(hwi, event uintptr, hdrs *[numBufs]wavehdr, bufs *[numBufs][]by
 					}
 					frames = append(frames, samples...)
 
-					// RMS as 0-100 with 8x gain (mic input is ~10% of full scale)
+					// Auto-scaled RMS: track peak RMS and scale 0-100 relative to it
 					rms := math.Sqrt(sumSq / float64(len(samples)))
-					level := int32(rms / 327.68 * 8) // 0-100 with gain
+					// Update peak tracker (fast attack, slow decay)
+					if rms > peakRMS {
+						peakRMS = rms
+					} else {
+						peakRMS *= 0.995 // slow decay (~3s to halve at 16kHz/1024 chunks)
+					}
+					// Floor so silence doesn't cause division issues
+					ref := peakRMS
+					if ref < 200 {
+						ref = 200
+					}
+					level := int32(rms / ref * 100)
 					if level > 100 {
 						level = 100
 					}
