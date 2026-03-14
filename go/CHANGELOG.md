@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.9.6
+- Normalize saved audio to ~80% peak for listenable playback (raw mic input was ~10% peak)
+
 ## v2.9.5
 - Shared HTTP client with keep-alive for speech server (reuses TCP connections between warmup and transcription)
 - Per-request timeout 5s (was 10s) - LAN responses are always <500ms when healthy

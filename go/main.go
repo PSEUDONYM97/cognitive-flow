@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.5"
+	version = "2.9.6"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -1909,11 +1909,49 @@ func saveAudio(samples []int16) {
 	os.MkdirAll(dir, 0755)
 	name := time.Now().Format("2006-01-02_15-04-05") + ".wav"
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, encodeWAV(samples), 0644); err != nil {
+
+	// Normalize audio for listenable playback (target peak ~80% of full scale)
+	normalized := normalizeAudio(samples)
+
+	if err := os.WriteFile(path, encodeWAV(normalized), 0644); err != nil {
 		log("Audio save failed: %v", err)
 		return
 	}
 	log("Saved %s", path)
+}
+
+func normalizeAudio(samples []int16) []int16 {
+	if len(samples) == 0 {
+		return samples
+	}
+	var peak int16
+	for _, s := range samples {
+		if s < 0 {
+			s = -s
+		}
+		if s > peak {
+			peak = s
+		}
+	}
+	if peak < 500 { // essentially silence, don't amplify noise
+		return samples
+	}
+	target := int32(26214) // ~80% of 32767
+	gain := float64(target) / float64(peak)
+	if gain <= 1.05 { // already loud enough
+		return samples
+	}
+	out := make([]int16, len(samples))
+	for i, s := range samples {
+		v := int32(float64(s) * gain)
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		out[i] = int16(v)
+	}
+	return out
 }
 
 func encodeWAV(samples []int16) []byte {
