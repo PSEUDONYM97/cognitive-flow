@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.9.7"
+	version = "2.9.8"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -1743,9 +1743,9 @@ func captureLoop(hwi, event uintptr, hdrs *[numBufs]wavehdr, bufs *[numBufs][]by
 					}
 					frames = append(frames, samples...)
 
-					// RMS as 0-100 (32768 max for int16)
+					// RMS as 0-100 with 8x gain (mic input is ~10% of full scale)
 					rms := math.Sqrt(sumSq / float64(len(samples)))
-					level := int32(rms / 327.68) // 0-100
+					level := int32(rms / 327.68 * 8) // 0-100 with gain
 					if level > 100 {
 						level = 100
 					}

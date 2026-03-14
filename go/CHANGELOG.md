@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.9.8
+- 8x gain on audio level meter so recording indicator visually responds to speech
+
 ## v2.9.7
 - Right-click indicator to copy last transcription to clipboard
 
