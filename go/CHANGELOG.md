@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.10.1
+- Fix media toggle hitting wrong app: verify audio stopped after pause, undo if it didn't
+
 ## v2.10.0
 - VU meter status bar: width and brightness scale with audio level, centered on screen
 - Indicator pulses with voice: core radius grows 24-34px based on audio level, ring follows

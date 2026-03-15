@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.10.0"
+	version = "2.10.1"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -654,12 +654,16 @@ func pauseMedia() {
 		log("No audio playing, skipping pause")
 		return
 	}
-	// SendInput with VK_MEDIA_PLAY_PAUSE goes through the keyboard -> shell -> SMTC
-	// routing that Chrome/Spotify actually respond to. WM_APPCOMMAND sent directly
-	// to windows doesn't reliably reach the media session handler.
-	// The isAudioPlaying() guard above prevents accidental starts (only fires when
-	// audio IS playing, so the toggle always means "pause").
 	sendKey(0xB3, keyeventfExtended) // VK_MEDIA_PLAY_PAUSE
+	// Verify we actually paused something - SMTC might have toggled the wrong app
+	time.Sleep(300 * time.Millisecond)
+	if isAudioPlaying() {
+		// Audio still playing: we toggled the wrong app (e.g. started music instead of
+		// pausing YouTube). Undo by sending the key again.
+		log("Media still playing after toggle - wrong app targeted, undoing")
+		sendKey(0xB3, keyeventfExtended)
+		return
+	}
 	mediaPaused = true
 	log("Media paused (SendInput)")
 }
