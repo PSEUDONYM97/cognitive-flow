@@ -65,6 +65,9 @@ FINAL_SUMMARY.md
 REVOLUTION.md
 START_HERE.md
 
+# Environment files
+.env*
+
 # OS files
 .DS_Store
 Thumbs.db
