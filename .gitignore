@@ -35,8 +35,8 @@ env/
 # Obsidian
 .obsidian/
 
-# Test files and experiments
-test_*.py
+# Root-level experiment scripts (not the tests/ directory)
+/test_*.py
 whisper_*.py
 whisper.py
 design*.py
