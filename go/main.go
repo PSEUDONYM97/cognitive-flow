@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.10.1"
+	version = "2.11.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -365,6 +365,7 @@ var state struct {
 	recentTexts    [5]string // last 5 transcriptions (circular)
 	recentCount    int       // total transcription count
 	startTime      time.Time // for uptime display
+	recordingFgWnd uintptr   // foreground window when recording started
 
 	hook     uintptr
 	bar      uintptr // screen-edge recording bar
@@ -724,6 +725,7 @@ var audio struct {
 func startRecording() {
 	log("Recording (clipboard: %v)", state.clipboardMode)
 	state.recording = true
+	state.recordingFgWnd, _, _ = pGetForegroundWindow.Call()
 	setPhase(phaseRecording)
 
 	// Pause media so mic doesn't pick up playback
@@ -771,6 +773,8 @@ func startRecording() {
 	go captureLoop(audio.hwi, audio.event, &audio.hdrs, &audio.bufs, audio.stopCh, audio.frameCh)
 
 	// Goroutine to receive frames when recording stops
+	// Captures its own frameCh reference so overlapping recordings don't collide
+	myFrameCh := audio.frameCh
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -778,7 +782,7 @@ func startRecording() {
 				setPhase(phaseIdle)
 			}
 		}()
-		frames := <-audio.frameCh
+		frames := <-myFrameCh
 
 		state.mu.Lock()
 		clipboard := state.clipboardMode
@@ -791,9 +795,27 @@ func startRecording() {
 		}
 
 		dur := float64(len(frames)) / sampleRate
-		log("Captured %.1fs", dur)
+
+		// Check if recording is essentially silence (peak < 1% of full scale)
+		var peak int16
+		for _, s := range frames {
+			if s < 0 {
+				s = -s
+			}
+			if s > peak {
+				peak = s
+			}
+		}
+		if peak < 328 { // ~1% of 32768
+			log("Silent recording (%.1fs, peak=%d), discarding", dur, peak)
+			setPhase(phaseIdle)
+			return
+		}
+
+		log("Captured %.1fs (peak=%d)", dur, peak)
 
 		// Save audio BEFORE transcription (crash resilient)
+		// Only update lastSamples if we have real audio (protects retry)
 		state.lastSamples = frames
 		saveAudio(frames)
 
@@ -1907,13 +1929,22 @@ func transcribe(samples []int16, clipboard bool) {
 		copyToClipboard(text)
 		log("Copied to clipboard")
 	} else {
-		typeStart := time.Now()
-		if err := typeText(text + " "); err != nil {
-			log("SendInput failed: %v - copying to clipboard", err)
+		// Focus check: if the foreground window changed since recording started,
+		// don't type into the wrong app - copy to clipboard instead
+		currentFg, _, _ := pGetForegroundWindow.Call()
+		if state.recordingFgWnd != 0 && currentFg != state.recordingFgWnd {
 			copyToClipboard(text)
-			notify("Typed via clipboard", "SendInput failed, text copied instead")
+			log("Focus changed during recording - copied to clipboard instead of typing")
+			notify("Copied to clipboard", "Focus changed, text copied instead of typed")
 		} else {
-			log("Typed %d chars in %dms", len(text), time.Since(typeStart).Milliseconds())
+			typeStart := time.Now()
+			if err := typeText(text + " "); err != nil {
+				log("SendInput failed: %v - copying to clipboard", err)
+				copyToClipboard(text)
+				notify("Typed via clipboard", "SendInput failed, text copied instead")
+			} else {
+				log("Typed %d chars in %dms", len(text), time.Since(typeStart).Milliseconds())
+			}
 		}
 	}
 

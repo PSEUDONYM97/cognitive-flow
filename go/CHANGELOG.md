@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.11.0
+- Silent recordings discarded (peak < 1% of full scale) - protects lastOutput/lastSamples for retry
+- Focus check before typing: if foreground window changed since recording started, copies to clipboard instead
+- Overlapping recordings supported: pipeline goroutines capture own channel reference
+
 ## v2.10.1
 - Fix media toggle hitting wrong app: verify audio stopped after pause, undo if it didn't
 
