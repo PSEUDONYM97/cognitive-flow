@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.11.0"
+	version = "2.11.1"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -725,7 +725,6 @@ var audio struct {
 func startRecording() {
 	log("Recording (clipboard: %v)", state.clipboardMode)
 	state.recording = true
-	state.recordingFgWnd, _, _ = pGetForegroundWindow.Call()
 	setPhase(phaseRecording)
 
 	// Pause media so mic doesn't pick up playback
@@ -814,10 +813,8 @@ func startRecording() {
 
 		log("Captured %.1fs (peak=%d)", dur, peak)
 
-		// Save audio BEFORE transcription (crash resilient)
-		// Only update lastSamples if we have real audio (protects retry)
+		// Update retry state but don't save audio yet - wait for successful transcription
 		state.lastSamples = frames
-		saveAudio(frames)
 
 		setPhase(phaseProcessing)
 		transcribe(frames, clipboard)
@@ -830,6 +827,7 @@ func stopRecording() {
 	}
 	log("Stopped")
 	state.recording = false
+	state.recordingFgWnd, _, _ = pGetForegroundWindow.Call() // capture where cursor IS when you stop
 	resumeMedia() // resume immediately on stop, don't wait for transcription
 
 	// Signal capture loop to stop, then stop the device
@@ -1895,10 +1893,13 @@ func transcribe(samples []int16, clipboard bool) {
 
 	raw := strings.TrimSpace(result.Text)
 	if raw == "" {
-		log("Empty transcription")
+		log("Empty transcription, not saving audio")
 		setPhase(phaseIdle)
 		return
 	}
+
+	// Speech confirmed - save audio archive
+	saveAudio(samples)
 
 	// Full text processing pipeline (6 passes)
 	text := processText(raw)

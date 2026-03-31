@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.11.1
+- Focus check captures window at recording STOP (not start) - click around while talking, it checks where you are when you finish
+- Audio only saved after successful transcription (no more junk files from silence/noise)
+
 ## v2.11.0
 - Silent recordings discarded (peak < 1% of full scale) - protects lastOutput/lastSamples for retry
 - Focus check before typing: if foreground window changed since recording started, copies to clipboard instead
