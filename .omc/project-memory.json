@@ -1,0 +1,121 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775014526720,
+  "projectRoot": "/srv/share/projects/ai-transcription",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml",
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "pytest",
+        "version": null,
+        "category": "testing"
+      }
+    ],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "C:\\Users\\jwill\\.claude\\plugins\\marketplaces\\claude-plugins-official": {
+      "path": "C:\\Users\\jwill\\.claude\\plugins\\marketplaces\\claude-plugins-official",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775014526705,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "cognitive_flow": {
+      "path": "cognitive_flow",
+      "purpose": null,
+      "fileCount": 8,
+      "lastAccessed": 1775014526708,
+      "keyFiles": [
+        "__init__.py",
+        "__main__.py",
+        "app.py",
+        "backends.py",
+        "logger.py"
+      ]
+    },
+    "cognitive_flow.egg-info": {
+      "path": "cognitive_flow.egg-info",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1775014526710,
+      "keyFiles": [
+        "PKG-INFO",
+        "SOURCES.txt",
+        "dependency_links.txt",
+        "entry_points.txt",
+        "requires.txt"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 2,
+      "lastAccessed": 1775014526711,
+      "keyFiles": [
+        "COGNITIVE_FLOW_APP_DESCRIPTION.md",
+        "overlay_ui_research_2026-03-09.md"
+      ]
+    },
+    "go": {
+      "path": "go",
+      "purpose": null,
+      "fileCount": 8,
+      "lastAccessed": 1775014526715,
+      "keyFiles": [
+        "CHANGELOG.md",
+        "cogflow.exe",
+        "cognitive-flow.exe",
+        "deploy.sh",
+        "go.mod"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "go/main.go",
+      "accessCount": 21,
+      "lastAccessed": 1775015423714,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

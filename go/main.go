@@ -338,7 +338,10 @@ type iconinfo struct {
 const (
 	phaseIdle       int32 = 0
 	phaseRecording  int32 = 1
-	phaseProcessing int32 = 2
+	phaseCaptured   int32 = 2 // brief flash: "got your audio"
+	phaseProcessing int32 = 3
+	phaseSuccess    int32 = 4 // brief flash: "text delivered"
+	phaseFailed     int32 = 5 // click indicator to retry
 )
 
 var phase atomic.Int32
@@ -362,10 +365,12 @@ var state struct {
 
 	lastOutput     string    // last transcription result for "Copy Last"
 	lastSamples    []int16  // last recording for "Retry Last"
+	lastClipboard  bool     // was last recording clipboard mode?
 	recentTexts    [5]string // last 5 transcriptions (circular)
 	recentCount    int       // total transcription count
 	startTime      time.Time // for uptime display
 	recordingFgWnd uintptr   // foreground window when recording started
+	cancelled      bool     // set by cancel() to abort pipeline
 
 	hook     uintptr
 	bar      uintptr // screen-edge recording bar
@@ -703,12 +708,27 @@ func cancel() {
 	}
 	log("Cancelled")
 	state.recording = false
+	state.cancelled = true // signal pipeline goroutine to abort
 	if audio.stopCh != nil {
 		close(audio.stopCh)
 		audio.stopCh = nil
 	}
 	resumeMedia()
 	setPhase(phaseIdle)
+}
+
+// retryLast re-transcribes the last recorded audio
+func retryLast() {
+	if len(state.lastSamples) == 0 {
+		return
+	}
+	log("Retrying last recording (%d samples)", len(state.lastSamples))
+	samples := state.lastSamples
+	clipboard := state.lastClipboard
+	go func() {
+		setPhase(phaseProcessing)
+		transcribe(samples, clipboard)
+	}()
 }
 
 // ----- Audio device state (owned by startRecording/stopRecording, used by captureLoop) -----
@@ -783,9 +803,18 @@ func startRecording() {
 		}()
 		frames := <-myFrameCh
 
+		// Check if cancel was requested
 		state.mu.Lock()
 		clipboard := state.clipboardMode
+		wasCancelled := state.cancelled
+		state.cancelled = false
 		state.mu.Unlock()
+
+		if wasCancelled {
+			log("Pipeline aborted (cancelled)")
+			setPhase(phaseIdle)
+			return
+		}
 
 		if len(frames) == 0 {
 			log("No audio captured")
@@ -813,8 +842,13 @@ func startRecording() {
 
 		log("Captured %.1fs (peak=%d)", dur, peak)
 
-		// Update retry state but don't save audio yet - wait for successful transcription
+		// Update retry state
 		state.lastSamples = frames
+		state.lastClipboard = clipboard
+
+		// "Captured" flash - brief confirmation before processing
+		setPhase(phaseCaptured)
+		time.Sleep(400 * time.Millisecond)
 
 		setPhase(phaseProcessing)
 		transcribe(frames, clipboard)
@@ -1886,8 +1920,8 @@ func transcribe(samples []int16, clipboard bool) {
 
 	if lastErr != nil {
 		log("Transcription failed: %v", lastErr)
-		notify("Transcription failed", lastErr.Error())
-		setPhase(phaseIdle)
+		notify("Transcription failed - click indicator to retry", lastErr.Error())
+		setPhase(phaseFailed)
 		return
 	}
 
