@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "2.11.1"
+	version = "3.0.0"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -2435,6 +2435,13 @@ var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 			color = uintptr(cb)<<16 | uintptr(cg)<<8 | uintptr(cr) // BGR
 			brush, _, _ := pCreateSolidBrush.Call(color)
 			r := [4]int32{x, 0, x + w, barHeight}
+			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
+			pDeleteObject.Call(brush)
+		case phaseCaptured:
+			// Brief green flash across full bar
+			color = 0x005EC522 // Green (#22C55E in BGR)
+			brush, _, _ := pCreateSolidBrush.Call(color)
+			r := [4]int32{0, 0, int32(sw), barHeight}
 			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
 			pDeleteObject.Call(brush)
 		case phaseProcessing:

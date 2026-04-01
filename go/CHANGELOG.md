@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.0.0
+- 6-phase state machine: idle, recording, captured, processing, success, failed
+- "Captured" green flash (400ms) confirms audio received before processing
+- "Success" green fade-out (600ms) confirms text was delivered
+- "Failed" red pulsing indicator with click-to-retry (no more digging through tray menus)
+- Escape cancel race fix: pipeline checks cancelled flag before processing
+- Cancel flag prevents orphaned transcriptions from running after double-tap escape
+
 ## v2.11.1
 - Focus check captures window at recording STOP (not start) - click around while talking, it checks where you are when you finish
 - Audio only saved after successful transcription (no more junk files from silence/noise)
