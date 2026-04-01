@@ -112,8 +112,8 @@
   "hotPaths": [
     {
       "path": "go/main.go",
-      "accessCount": 21,
-      "lastAccessed": 1775015423714,
+      "accessCount": 35,
+      "lastAccessed": 1775015529668,
       "type": "file"
     }
   ],

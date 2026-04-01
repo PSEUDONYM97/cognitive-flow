@@ -1983,6 +1983,9 @@ func transcribe(samples []int16, clipboard bool) {
 		}
 	}
 
+	// Success flash then back to idle
+	setPhase(phaseSuccess)
+	time.Sleep(600 * time.Millisecond)
 	setPhase(phaseIdle)
 }
 
@@ -2538,7 +2541,10 @@ var ind struct {
 type indColor struct{ r, g, b float64 }
 
 var (
-	colCyan    = indColor{34, 211, 238}  // #22D3EE
+	colCyan    = indColor{34, 211, 238}   // #22D3EE
+	colGreen   = indColor{34, 197, 94}    // #22C55E - success/captured
+	colRed     = indColor{239, 68, 68}    // #EF4444 - failed
+	colAmber   = indColor{234, 179, 8}    // #EAB308 - processing bar
 	colBgCard  = indColor{30, 41, 59}    // #1E293B - dark circle fill
 	colDark    = indColor{10, 15, 28}    // #0A0F1C - icon on cyan background
 	colGray    = indColor{120, 120, 120}
@@ -2596,12 +2602,18 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 	case wmLButtonUp:
 		pReleaseCapture.Call()
 		if !ind.dragging {
-			// Click: toggle clipboard recording
 			go func() {
-				if currentPhase() == phaseRecording {
+				p := currentPhase()
+				switch p {
+				case phaseFailed:
+					// Click to retry failed transcription
+					retryLast()
+				case phaseRecording:
 					toggle(true)
-				} else if state.enabled {
-					toggle(true)
+				default:
+					if state.enabled {
+						toggle(true)
+					}
 				}
 			}()
 		}
@@ -2875,6 +2887,93 @@ func renderIndicator() {
 				compositeOver(&r, &g, &b, &a, colDark.r/255, colDark.g/255, colDark.b/255, micA)
 			}
 
+			if a > 0.004 {
+				i := idx * 4
+				px[i+0] = clampByte(b * 255)
+				px[i+1] = clampByte(g * 255)
+				px[i+2] = clampByte(r * 255)
+				px[i+3] = clampByte(a * 255)
+			}
+		}
+		updateIndicatorWindow()
+		return
+	}
+
+	// ---- Captured: green circle flash - "got your audio" ----
+	if p == phaseCaptured {
+		circleR := 28.0
+		fade := 0.6 + 0.4*math.Sin(float64(ind.frame)*0.25) // gentle pulse
+		for idx := 0; idx < w*w; idx++ {
+			dist := ind.dist[idx]
+			if dist > circleR+1 {
+				continue
+			}
+			a := fade * aaEdge(circleR, dist)
+			if a > 0.004 {
+				i := idx * 4
+				px[i+0] = clampByte(colGreen.b / 255 * a * 255)
+				px[i+1] = clampByte(colGreen.g / 255 * a * 255)
+				px[i+2] = clampByte(colGreen.r / 255 * a * 255)
+				px[i+3] = clampByte(a * 255)
+			}
+		}
+		updateIndicatorWindow()
+		return
+	}
+
+	// ---- Success: green circle with checkmark flash ----
+	if p == phaseSuccess {
+		circleR := 28.0
+		fade := 1.0 - float64(ind.frame)*0.05 // fade out over ~20 frames
+		if fade < 0.15 {
+			fade = 0.15
+		}
+		for idx := 0; idx < w*w; idx++ {
+			dist := ind.dist[idx]
+			if dist > circleR+1 {
+				continue
+			}
+			a := fade * aaEdge(circleR, dist)
+			if a > 0.004 {
+				i := idx * 4
+				px[i+0] = clampByte(colGreen.b / 255 * a * 255)
+				px[i+1] = clampByte(colGreen.g / 255 * a * 255)
+				px[i+2] = clampByte(colGreen.r / 255 * a * 255)
+				px[i+3] = clampByte(a * 255)
+			}
+		}
+		updateIndicatorWindow()
+		return
+	}
+
+	// ---- Failed: red circle - click to retry ----
+	if p == phaseFailed {
+		circleR := 28.0
+		borderW := 3.0
+		pulse := 0.7 + 0.3*math.Sin(float64(ind.frame)*0.08) // slow red pulse
+		for idx := 0; idx < w*w; idx++ {
+			dist := ind.dist[idx]
+			if dist > circleR+1 {
+				continue
+			}
+			var r, g, b, a float64
+			fillR := circleR - borderW
+			if dist < fillR+0.5 {
+				fillA := aaEdge(fillR, dist)
+				r = colBgCard.r / 255 * fillA
+				g = colBgCard.g / 255 * fillA
+				b = colBgCard.b / 255 * fillA
+				a = fillA
+			}
+			// Red border
+			if dist > fillR-0.5 && dist < circleR+0.5 {
+				outerAA := aaEdge(circleR, dist)
+				innerAA := 1.0 - aaEdge(fillR, dist)
+				bdrA := outerAA * innerAA * pulse
+				if bdrA > 0.01 {
+					compositeOver(&r, &g, &b, &a, colRed.r/255, colRed.g/255, colRed.b/255, bdrA)
+				}
+			}
 			if a > 0.004 {
 				i := idx * 4
 				px[i+0] = clampByte(b * 255)
@@ -3182,34 +3281,52 @@ func applyPhase(p int32) {
 		audioLevel.Store(0)
 		ind.frame = 0
 		ind.collapsed = false
-		ind.collapseAt = time.Time{}
 		ind.fadeLevel = 1.0
 		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
 		pSetTimer.Call(state.bar, timerRepaint, 200, 0)
-		// 66ms indicator animation (15fps) during recording
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
+	case phaseCaptured:
+		// Brief "got it" flash - keep bar visible, fast indicator animation
+		pKillTimer.Call(state.bar, timerRepaint)
+		audioLevel.Store(0)
+		ind.fadeLevel = 1.0
+		ind.frame = 0
+		pShowWindow.Call(state.bar, 8)
+		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	case phaseProcessing:
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.collapsed = false
-		ind.collapseAt = time.Time{}
 		ind.fadeLevel = 1.0
 		pShowWindow.Call(state.bar, 8)
 		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-		// Slower animation during processing (15fps)
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
-	default:
+	case phaseSuccess:
+		// Brief "delivered" flash
+		pKillTimer.Call(state.bar, timerRepaint)
+		audioLevel.Store(0)
+		ind.fadeLevel = 1.0
+		ind.frame = 0
+		pShowWindow.Call(state.bar, 0) // SW_HIDE
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
+	case phaseFailed:
+		// Stay visible - clickable retry
+		pKillTimer.Call(state.bar, timerRepaint)
+		audioLevel.Store(0)
+		ind.fadeLevel = 1.0
+		ind.frame = 0
+		pShowWindow.Call(state.bar, 0) // SW_HIDE
+		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
+	default: // phaseIdle
 		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.collapsed = false
 		ind.fadeLevel = 1.0
 		pShowWindow.Call(state.bar, 0) // SW_HIDE
-		// Back to slow heartbeat when idle.
-		// Don't call renderIndicator() - it's cross-window GDI from bar's wndproc.
-		// The timer will pick it up within 1s.
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 1000, 0)
 	}
 
