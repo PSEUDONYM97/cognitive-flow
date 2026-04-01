@@ -1,0 +1,388 @@
+2026-02-20 13:43:49.013 | 
+2026-02-20 13:43:49.013 | ====================
+2026-02-20 13:43:49.013 | == NeMo Framework ==
+2026-02-20 13:43:49.013 | ====================
+2026-02-20 13:43:49.017 | 
+2026-02-20 13:43:49.017 | NVIDIA Release  (build 100464919)
+2026-02-20 13:43:49.018 | Container image Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-02-20 13:43:49.020 | Copyright (c) 2014-2024 Facebook Inc.
+2026-02-20 13:43:49.020 | Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+2026-02-20 13:43:49.020 | Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+2026-02-20 13:43:49.020 | Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+2026-02-20 13:43:49.020 | Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+2026-02-20 13:43:49.020 | Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+2026-02-20 13:43:49.020 | Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+2026-02-20 13:43:49.020 | Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+2026-02-20 13:43:49.020 | Copyright (c) 2015      Google Inc.
+2026-02-20 13:43:49.020 | Copyright (c) 2015      Yangqing Jia
+2026-02-20 13:43:49.020 | Copyright (c) 2013-2016 The Caffe contributors
+2026-02-20 13:43:49.020 | All rights reserved.
+2026-02-20 13:43:49.021 | 
+2026-02-20 13:43:49.021 | Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+2026-02-20 13:43:49.021 | 
+2026-02-20 13:43:49.021 | This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+2026-02-20 13:43:49.021 | By pulling and using the container, you accept the terms and conditions of this license:
+2026-02-20 13:43:49.021 | https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+2026-02-20 13:43:49.277 | 
+2026-02-20 13:43:49.277 | NOTE: The SHMEM allocation limit is set to the default of 64MB.  This may be
+2026-02-20 13:43:49.277 |    insufficient for NeMo Framework.  NVIDIA recommends the use of the following flags:
+2026-02-20 13:43:49.277 |    docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 ...
+2026-02-20 13:43:49.277 | 
+2026-02-20 13:43:54.530 | [NeMo W 2026-02-20 19:43:54 nemo_logging:349] /opt/megatron-lm/megatron/core/tensor_parallel/layers.py:280: FutureWarning: `torch.cuda.amp.custom_fwd(args...)` is deprecated. Please use `torch.amp.custom_fwd(args..., device_type='cuda')` instead.
+2026-02-20 13:43:54.530 |       def forward(ctx, input, weight, bias, allreduce_dgrad):
+2026-02-20 13:43:54.530 |     
+2026-02-20 13:43:54.530 | [NeMo W 2026-02-20 19:43:54 nemo_logging:349] /opt/megatron-lm/megatron/core/tensor_parallel/layers.py:290: FutureWarning: `torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.
+2026-02-20 13:43:54.530 |       def backward(ctx, grad_output):
+2026-02-20 13:43:54.530 |     
+2026-02-20 13:43:54.530 | [NeMo W 2026-02-20 19:43:54 nemo_logging:349] /opt/megatron-lm/megatron/core/tensor_parallel/layers.py:381: FutureWarning: `torch.cuda.amp.custom_fwd(args...)` is deprecated. Please use `torch.amp.custom_fwd(args..., device_type='cuda')` instead.
+2026-02-20 13:43:54.530 |       def forward(
+2026-02-20 13:43:54.530 |     
+2026-02-20 13:43:54.530 | [NeMo W 2026-02-20 19:43:54 nemo_logging:349] /opt/megatron-lm/megatron/core/tensor_parallel/layers.py:420: FutureWarning: `torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.
+2026-02-20 13:43:54.530 |       def backward(ctx, grad_output):
+2026-02-20 13:43:54.530 |     
+2026-02-20 13:43:55.437 | [NeMo W 2026-02-20 19:43:55 nemo_logging:349] /opt/megatron-lm/megatron/core/dist_checkpointing/strategies/torch.py:17: DeprecationWarning: `torch.distributed._sharded_tensor` will be deprecated, use `torch.distributed._shard.sharded_tensor` instead
+2026-02-20 13:43:55.437 |       from torch.distributed._sharded_tensor import ShardedTensor as TorchShardedTensor
+2026-02-20 13:43:55.437 |     
+2026-02-20 13:43:56.142 | INFO:     Started server process [1]
+2026-02-20 13:43:56.142 | INFO:     Waiting for application startup.
+2026-02-20 13:43:56.142 | INFO:     Application startup complete.
+2026-02-20 13:43:56.143 | INFO:     Uvicorn running on http://0.0.0.0:9200 (Press CTRL+C to quit)
+2026-02-20 13:45:16.495 | [NeMo I 2026-02-20 19:45:16 mixins:173] Tokenizer SentencePieceTokenizer initialized with 1024 tokens
+2026-02-20 13:45:16.988 | [NeMo W 2026-02-20 19:45:16 modelPT:176] If you intend to do training or fine-tuning, please call the ModelPT.setup_training_data() method and provide a valid configuration file to setup the train data loader.
+2026-02-20 13:45:16.988 |     Train config : 
+2026-02-20 13:45:16.988 |     manifest_filepath: null
+2026-02-20 13:45:16.988 |     sample_rate: 16000
+2026-02-20 13:45:16.988 |     batch_size: 1
+2026-02-20 13:45:16.988 |     shuffle: true
+2026-02-20 13:45:16.988 |     num_workers: 8
+2026-02-20 13:45:16.988 |     pin_memory: true
+2026-02-20 13:45:16.988 |     max_duration: 20
+2026-02-20 13:45:16.988 |     min_duration: 0.1
+2026-02-20 13:45:16.988 |     is_tarred: true
+2026-02-20 13:45:16.988 |     tarred_audio_filepaths: null
+2026-02-20 13:45:16.988 |     shuffle_n: 2048
+2026-02-20 13:45:16.988 |     bucketing_strategy: fully_randomized
+2026-02-20 13:45:16.988 |     bucketing_batch_size:
+2026-02-20 13:45:16.988 |     - 64
+2026-02-20 13:45:16.988 |     - 64
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 16
+2026-02-20 13:45:16.988 |     - 16
+2026-02-20 13:45:16.988 |     - 64
+2026-02-20 13:45:16.988 |     - 64
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 16
+2026-02-20 13:45:16.988 |     - 16
+2026-02-20 13:45:16.988 |     - 64
+2026-02-20 13:45:16.988 |     - 64
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 32
+2026-02-20 13:45:16.988 |     - 16
+2026-02-20 13:45:16.988 |     - 16
+2026-02-20 13:45:16.988 |     defer_setup: true
+2026-02-20 13:45:16.988 |     
+2026-02-20 13:45:16.989 | [NeMo W 2026-02-20 19:45:16 modelPT:183] If you intend to do validation, please call the ModelPT.setup_validation_data() or ModelPT.setup_multiple_validation_data() method and provide a valid configuration file to setup the validation data loader(s). 
+2026-02-20 13:45:16.989 |     Validation config : 
+2026-02-20 13:45:16.989 |     manifest_filepath: null
+2026-02-20 13:45:16.989 |     sample_rate: 16000
+2026-02-20 13:45:16.989 |     batch_size: 16
+2026-02-20 13:45:16.989 |     shuffle: false
+2026-02-20 13:45:16.989 |     use_start_end_token: false
+2026-02-20 13:45:16.989 |     num_workers: 8
+2026-02-20 13:45:16.989 |     pin_memory: true
+2026-02-20 13:45:16.989 |     
+2026-02-20 13:45:16.989 | [NeMo W 2026-02-20 19:45:16 modelPT:189] Please call the ModelPT.setup_test_data() or ModelPT.setup_multiple_test_data() method and provide a valid configuration file to setup the test data loader(s).
+2026-02-20 13:45:16.989 |     Test config : 
+2026-02-20 13:45:16.989 |     manifest_filepath: null
+2026-02-20 13:45:16.989 |     sample_rate: 16000
+2026-02-20 13:45:16.989 |     batch_size: 16
+2026-02-20 13:45:16.989 |     shuffle: false
+2026-02-20 13:45:16.989 |     use_start_end_token: false
+2026-02-20 13:45:16.989 |     num_workers: 8
+2026-02-20 13:45:16.989 |     pin_memory: true
+2026-02-20 13:45:16.989 |     
+2026-02-20 13:45:16.992 | [NeMo I 2026-02-20 19:45:16 features:305] PADDING: 0
+2026-02-20 13:45:22.595 | [NeMo I 2026-02-20 19:45:22 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 13:45:22.595 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 13:45:22.597 | [NeMo I 2026-02-20 19:45:22 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 13:45:22.597 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 13:45:22.614 | [NeMo I 2026-02-20 19:45:22 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 13:45:22.614 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 13:45:26.684 | [NeMo I 2026-02-20 19:45:26 save_restore_connector:275] Model EncDecRNNTBPEModel was successfully restored from /root/.cache/huggingface/hub/models--nvidia--parakeet-tdt-1.1b/snapshots/53276c6469d1f17a1352e30c4d11be3d0d7e9575/parakeet-tdt-1.1b.nemo.
+2026-02-20 13:45:27.802 | 
+2026-02-20 13:45:27.833 | 
+2026-02-20 13:45:27.844 | INFO:     172.17.0.1:37800 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:45:45.419 | INFO:     172.17.0.1:60486 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:45:47.884 | INFO:     172.17.0.1:60498 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:45:47.893 | INFO:     172.17.0.1:60502 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:46:01.324 | INFO:     172.17.0.1:35152 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:46:33.877 | 
+2026-02-20 13:46:33.888 | INFO:     172.17.0.1:54088 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:46:37.342 | INFO:     172.17.0.1:39348 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:46:40.804 | 
+2026-02-20 13:46:40.814 | INFO:     172.17.0.1:39364 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:47:29.874 | INFO:     172.17.0.1:45206 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:47:40.067 | 
+2026-02-20 13:47:40.077 | INFO:     172.17.0.1:33178 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:49:01.170 | INFO:     172.17.0.1:51750 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:49:02.125 | INFO:     172.17.0.1:51752 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:49:08.208 | 
+2026-02-20 13:49:08.218 | INFO:     172.17.0.1:38558 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:49:52.514 | INFO:     172.17.0.1:42024 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:49:57.475 | 
+2026-02-20 13:49:57.486 | INFO:     172.17.0.1:36160 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:51:12.782 | INFO:     172.17.0.1:44866 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:51:14.761 | 
+2026-02-20 13:51:14.772 | INFO:     172.17.0.1:40848 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:51:16.153 | INFO:     172.17.0.1:40850 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:51:19.043 | 
+2026-02-20 13:51:19.054 | INFO:     172.17.0.1:40864 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:52:59.462 | INFO:     172.17.0.1:46966 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:53:21.210 | INFO:     172.17.0.1:52672 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:53:30.523 | 
+2026-02-20 13:53:30.533 | INFO:     172.17.0.1:37662 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:53:49.608 | INFO:     172.17.0.1:40832 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:55:24.462 | 
+2026-02-20 13:55:24.474 | INFO:     172.17.0.1:33828 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:56:54.634 | INFO:     172.17.0.1:38190 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:56:58.610 | 
+2026-02-20 13:56:58.621 | INFO:     172.17.0.1:38192 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:59:21.424 | INFO:     172.17.0.1:50552 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:59:25.243 | 
+2026-02-20 13:59:25.254 | INFO:     172.17.0.1:48220 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:59:44.605 | INFO:     172.17.0.1:60300 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:59:46.694 | 
+2026-02-20 13:59:46.704 | INFO:     172.17.0.1:60308 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 13:59:52.844 | INFO:     172.17.0.1:60324 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 13:59:55.932 | 
+2026-02-20 13:59:55.943 | INFO:     172.17.0.1:58070 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:00:37.035 | INFO:     172.17.0.1:58634 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:02:46.468 | 
+2026-02-20 14:02:46.480 | INFO:     172.17.0.1:51024 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:03:37.971 | INFO:     172.17.0.1:36872 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:03:46.021 | 
+2026-02-20 14:03:46.033 | INFO:     172.17.0.1:50508 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:05:23.341 | INFO:     172.17.0.1:48944 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:05:29.604 | 
+2026-02-20 14:05:29.617 | INFO:     172.17.0.1:41886 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:06:43.979 | INFO:     172.17.0.1:40330 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:06:47.542 | 
+2026-02-20 14:06:47.552 | INFO:     172.17.0.1:40340 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:10:44.789 | INFO:     172.17.0.1:32824 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:11:03.500 | 
+2026-02-20 14:11:03.510 | INFO:     172.17.0.1:57478 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:19:21.464 | INFO:     172.17.0.1:49508 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:19:21.489 | INFO:     172.17.0.1:49524 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:19:29.334 | INFO:     172.17.0.1:45046 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:20:17.227 | [NeMo I 2026-02-20 20:20:17 mixins:173] Tokenizer SentencePieceTokenizer initialized with 1024 tokens
+2026-02-20 14:20:17.734 | [NeMo W 2026-02-20 20:20:17 modelPT:176] If you intend to do training or fine-tuning, please call the ModelPT.setup_training_data() method and provide a valid configuration file to setup the train data loader.
+2026-02-20 14:20:17.734 |     Train config : 
+2026-02-20 14:20:17.734 |     manifest_filepath: null
+2026-02-20 14:20:17.734 |     sample_rate: 16000
+2026-02-20 14:20:17.734 |     batch_size: 1
+2026-02-20 14:20:17.734 |     shuffle: true
+2026-02-20 14:20:17.734 |     num_workers: 8
+2026-02-20 14:20:17.734 |     pin_memory: true
+2026-02-20 14:20:17.734 |     max_duration: 20
+2026-02-20 14:20:17.734 |     min_duration: 0.1
+2026-02-20 14:20:17.734 |     is_tarred: true
+2026-02-20 14:20:17.734 |     tarred_audio_filepaths: null
+2026-02-20 14:20:17.734 |     shuffle_n: 2048
+2026-02-20 14:20:17.734 |     bucketing_strategy: fully_randomized
+2026-02-20 14:20:17.734 |     bucketing_batch_size:
+2026-02-20 14:20:17.734 |     - 64
+2026-02-20 14:20:17.734 |     - 64
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 16
+2026-02-20 14:20:17.734 |     - 16
+2026-02-20 14:20:17.734 |     - 64
+2026-02-20 14:20:17.734 |     - 64
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 16
+2026-02-20 14:20:17.734 |     - 16
+2026-02-20 14:20:17.734 |     - 64
+2026-02-20 14:20:17.734 |     - 64
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 32
+2026-02-20 14:20:17.734 |     - 16
+2026-02-20 14:20:17.734 |     - 16
+2026-02-20 14:20:17.734 |     defer_setup: true
+2026-02-20 14:20:17.734 |     
+2026-02-20 14:20:17.734 | [NeMo W 2026-02-20 20:20:17 modelPT:183] If you intend to do validation, please call the ModelPT.setup_validation_data() or ModelPT.setup_multiple_validation_data() method and provide a valid configuration file to setup the validation data loader(s). 
+2026-02-20 14:20:17.734 |     Validation config : 
+2026-02-20 14:20:17.734 |     manifest_filepath: null
+2026-02-20 14:20:17.734 |     sample_rate: 16000
+2026-02-20 14:20:17.734 |     batch_size: 16
+2026-02-20 14:20:17.734 |     shuffle: false
+2026-02-20 14:20:17.734 |     use_start_end_token: false
+2026-02-20 14:20:17.734 |     num_workers: 8
+2026-02-20 14:20:17.734 |     pin_memory: true
+2026-02-20 14:20:17.734 |     
+2026-02-20 14:20:17.735 | [NeMo W 2026-02-20 20:20:17 modelPT:189] Please call the ModelPT.setup_test_data() or ModelPT.setup_multiple_test_data() method and provide a valid configuration file to setup the test data loader(s).
+2026-02-20 14:20:17.735 |     Test config : 
+2026-02-20 14:20:17.735 |     manifest_filepath: null
+2026-02-20 14:20:17.735 |     sample_rate: 16000
+2026-02-20 14:20:17.735 |     batch_size: 16
+2026-02-20 14:20:17.735 |     shuffle: false
+2026-02-20 14:20:17.735 |     use_start_end_token: false
+2026-02-20 14:20:17.735 |     num_workers: 8
+2026-02-20 14:20:17.735 |     pin_memory: true
+2026-02-20 14:20:17.735 |     
+2026-02-20 14:20:17.738 | [NeMo I 2026-02-20 20:20:17 features:305] PADDING: 0
+2026-02-20 14:20:23.876 | [NeMo I 2026-02-20 20:20:23 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 14:20:23.876 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 14:20:23.878 | [NeMo I 2026-02-20 20:20:23 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 14:20:23.878 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 14:20:23.893 | [NeMo I 2026-02-20 20:20:23 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 14:20:23.893 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 14:20:26.232 | [NeMo I 2026-02-20 20:20:26 save_restore_connector:275] Model EncDecRNNTBPEModel was successfully restored from /root/.cache/huggingface/hub/models--nvidia--parakeet-tdt-1.1b/snapshots/53276c6469d1f17a1352e30c4d11be3d0d7e9575/parakeet-tdt-1.1b.nemo.
+2026-02-20 14:20:26.423 | 
+2026-02-20 14:20:26.434 | INFO:     172.17.0.1:41682 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:20:54.177 | INFO:     172.17.0.1:42726 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:21:14.320 | 
+2026-02-20 14:21:14.332 | INFO:     172.17.0.1:44596 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:26:35.600 | INFO:     172.17.0.1:52572 - "GET /health HTTP/1.1" 200 OK
+2026-02-20 14:27:04.929 | [NeMo I 2026-02-20 20:27:04 mixins:173] Tokenizer SentencePieceTokenizer initialized with 1024 tokens
+2026-02-20 14:27:05.405 | [NeMo W 2026-02-20 20:27:05 modelPT:176] If you intend to do training or fine-tuning, please call the ModelPT.setup_training_data() method and provide a valid configuration file to setup the train data loader.
+2026-02-20 14:27:05.406 |     Train config : 
+2026-02-20 14:27:05.406 |     manifest_filepath: null
+2026-02-20 14:27:05.406 |     sample_rate: 16000
+2026-02-20 14:27:05.406 |     batch_size: 1
+2026-02-20 14:27:05.406 |     shuffle: true
+2026-02-20 14:27:05.406 |     num_workers: 8
+2026-02-20 14:27:05.406 |     pin_memory: true
+2026-02-20 14:27:05.406 |     max_duration: 20
+2026-02-20 14:27:05.406 |     min_duration: 0.1
+2026-02-20 14:27:05.406 |     is_tarred: true
+2026-02-20 14:27:05.406 |     tarred_audio_filepaths: null
+2026-02-20 14:27:05.406 |     shuffle_n: 2048
+2026-02-20 14:27:05.406 |     bucketing_strategy: fully_randomized
+2026-02-20 14:27:05.406 |     bucketing_batch_size:
+2026-02-20 14:27:05.406 |     - 64
+2026-02-20 14:27:05.406 |     - 64
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 16
+2026-02-20 14:27:05.406 |     - 16
+2026-02-20 14:27:05.406 |     - 64
+2026-02-20 14:27:05.406 |     - 64
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 16
+2026-02-20 14:27:05.406 |     - 16
+2026-02-20 14:27:05.406 |     - 64
+2026-02-20 14:27:05.406 |     - 64
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 32
+2026-02-20 14:27:05.406 |     - 16
+2026-02-20 14:27:05.406 |     - 16
+2026-02-20 14:27:05.406 |     defer_setup: true
+2026-02-20 14:27:05.406 |     
+2026-02-20 14:27:05.406 | [NeMo W 2026-02-20 20:27:05 modelPT:183] If you intend to do validation, please call the ModelPT.setup_validation_data() or ModelPT.setup_multiple_validation_data() method and provide a valid configuration file to setup the validation data loader(s). 
+2026-02-20 14:27:05.406 |     Validation config : 
+2026-02-20 14:27:05.406 |     manifest_filepath: null
+2026-02-20 14:27:05.406 |     sample_rate: 16000
+2026-02-20 14:27:05.406 |     batch_size: 16
+2026-02-20 14:27:05.406 |     shuffle: false
+2026-02-20 14:27:05.406 |     use_start_end_token: false
+2026-02-20 14:27:05.406 |     num_workers: 8
+2026-02-20 14:27:05.406 |     pin_memory: true
+2026-02-20 14:27:05.406 |     
+2026-02-20 14:27:05.407 | [NeMo W 2026-02-20 20:27:05 modelPT:189] Please call the ModelPT.setup_test_data() or ModelPT.setup_multiple_test_data() method and provide a valid configuration file to setup the test data loader(s).
+2026-02-20 14:27:05.407 |     Test config : 
+2026-02-20 14:27:05.407 |     manifest_filepath: null
+2026-02-20 14:27:05.407 |     sample_rate: 16000
+2026-02-20 14:27:05.407 |     batch_size: 16
+2026-02-20 14:27:05.407 |     shuffle: false
+2026-02-20 14:27:05.407 |     use_start_end_token: false
+2026-02-20 14:27:05.407 |     num_workers: 8
+2026-02-20 14:27:05.407 |     pin_memory: true
+2026-02-20 14:27:05.407 |     
+2026-02-20 14:27:05.409 | [NeMo I 2026-02-20 20:27:05 features:305] PADDING: 0
+2026-02-20 14:27:09.789 | [NeMo I 2026-02-20 20:27:09 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 14:27:09.789 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 14:27:09.792 | [NeMo I 2026-02-20 20:27:09 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 14:27:09.792 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 14:27:09.806 | [NeMo I 2026-02-20 20:27:09 rnnt_models:225] Using RNNT Loss : tdt
+2026-02-20 14:27:09.806 |     Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+2026-02-20 14:27:11.876 | [NeMo I 2026-02-20 20:27:11 save_restore_connector:275] Model EncDecRNNTBPEModel was successfully restored from /root/.cache/huggingface/hub/models--nvidia--parakeet-tdt-1.1b/snapshots/53276c6469d1f17a1352e30c4d11be3d0d7e9575/parakeet-tdt-1.1b.nemo.
+2026-02-20 14:27:12.041 | 
+2026-02-20 14:27:12.052 | INFO:     172.17.0.1:55712 - "POST /transcribe HTTP/1.1" 200 OK
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s][NeMo W 2026-02-20 19:45:27 deprecated:65] Function ``_transcribe_output_processing`` is deprecated. The return type of args will be updated in the upcoming release to ensure a consistent output format across all decoder types, such that a "Hypothesis" object is always returned.
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:01<00:00,  1.12s/it]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:01<00:00,  1.12s/it]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  4.28it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  4.27it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 12.59it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  8.22it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  8.20it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 10.90it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 10.60it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 10.69it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 12.37it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  9.30it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  9.28it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.55it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.55it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 11.32it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 12.05it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 12.93it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 13.15it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.24it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.24it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.28it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.28it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.20it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  1.20it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00, 12.28it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  5.69it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  5.68it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  6.27it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  6.26it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  5.98it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  5.97it/s]
+2026-02-20 14:27:29.816 | Transcribing:   0%|          | 0/1 [00:00<?, ?it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  7.31it/s]
+2026-02-20 14:27:29.816 | Transcribing: 100%|██████████| 1/1 [00:00<00:00,  7.29it/s]
