@@ -112,8 +112,14 @@
   "hotPaths": [
     {
       "path": "go/main.go",
-      "accessCount": 35,
-      "lastAccessed": 1775015529668,
+      "accessCount": 39,
+      "lastAccessed": 1775015550280,
+      "type": "file"
+    },
+    {
+      "path": "go/CHANGELOG.md",
+      "accessCount": 2,
+      "lastAccessed": 1775015561352,
       "type": "file"
     }
   ],
