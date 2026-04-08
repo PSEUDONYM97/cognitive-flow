@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"sleep 30 && ssh master-pc \\\"curl -s http://localhost:9200/health\\\" 2>&1\",\"timeout\":60000,\"description\":\"Check CPU STT server health\"}",
-  "error": "Exit code 7",
-  "timestamp": "2026-04-06T00:49:48.702Z",
-  "retry_count": 1
+  "tool_input_preview": "{\"command\":\"scp \\\"devbox:C:/Users/jwill/Downloads/2026-04-08 12_41_17-.png\\\" /tmp/cogflow_screenshot.png 2>&1\",\"timeout\":10000,\"description\":\"Fetch screenshot alt quoting\"}",
+  "error": "Exit code 1\nscp: C:/Users/jwill/Downloads/2026-04-08: No such file or directory\nscp: 12_41_17-.png: No such file or directory",
+  "timestamp": "2026-04-08T17:41:43.720Z",
+  "retry_count": 3
 }

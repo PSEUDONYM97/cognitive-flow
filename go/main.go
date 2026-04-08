@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "3.0.1"
+	version = "3.0.2"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -842,9 +842,11 @@ func startRecording() {
 
 		log("Captured %.1fs (peak=%d)", dur, peak)
 
-		// Update retry state
+		// Save audio IMMEDIATELY - before transcription, before anything else.
+		// If transcription fails, crashes, or times out, the audio is safe on disk.
 		state.lastSamples = frames
 		state.lastClipboard = clipboard
+		saveAudio(frames)
 
 		// "Captured" flash - brief confirmation before processing
 		setPhase(phaseCaptured)
@@ -1932,8 +1934,6 @@ func transcribe(samples []int16, clipboard bool) {
 		return
 	}
 
-	// Speech confirmed - save audio archive
-	saveAudio(samples)
 
 	// Full text processing pipeline (6 passes)
 	text := processText(raw)
