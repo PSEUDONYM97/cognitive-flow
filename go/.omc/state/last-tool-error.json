@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"sleep 30 && ssh master-pc \\\"curl -s http://localhost:9200/health\\\" 2>&1\",\"timeout\":60000,\"description\":\"Check CPU STT server health\"}",
+  "error": "Exit code 7",
+  "timestamp": "2026-04-06T00:49:48.702Z",
+  "retry_count": 1
+}

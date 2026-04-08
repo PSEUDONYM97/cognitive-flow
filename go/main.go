@@ -1893,7 +1893,7 @@ func transcribe(samples []int16, clipboard bool) {
 			time.Sleep(delays[attempt-1])
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		req, _ := http.NewRequestWithContext(ctx, "POST", cfg.Server+"/transcribe", bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 
