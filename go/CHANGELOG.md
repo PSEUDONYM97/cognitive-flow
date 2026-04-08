@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.0.2
+- CRITICAL FIX: Save audio BEFORE transcription again (reverts v2.11.1 mistake that lost audio on failed transcriptions)
+
 ## v3.0.1
 - Per-request timeout 30s (was 5s) for CPU inference compatibility (~5.3s per transcription)
 
