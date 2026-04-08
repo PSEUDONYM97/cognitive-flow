@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.0.1
+- Per-request timeout 30s (was 5s) for CPU inference compatibility (~5.3s per transcription)
+
 ## v3.0.0
 - 6-phase state machine: idle, recording, captured, processing, success, failed
 - "Captured" green flash (400ms) confirms audio received before processing

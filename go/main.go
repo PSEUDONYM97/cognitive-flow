@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "3.0.0"
+	version = "3.0.1"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
