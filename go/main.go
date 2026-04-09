@@ -416,6 +416,9 @@ func main() {
 		return 1
 	}), 1)
 
+	// Load most recent audio file for retry across restarts
+	loadLastRecording()
+
 	// Check server
 	go func() {
 		if err := healthCheck(); err != nil {
