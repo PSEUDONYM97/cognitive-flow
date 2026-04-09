@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.0.4
+- Retry Last Recording survives restarts: loads most recent WAV from disk on startup
+
 ## v3.0.3
 - Fix: remove 5s global timeout on shared HTTP client that was overriding the 30s per-request timeout (every transcription was dying at 5s while server processed at 5.3s)
 

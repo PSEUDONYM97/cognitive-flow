@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "3.0.3"
+	version = "3.0.4"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -2006,6 +2006,37 @@ func saveAudio(samples []int16) {
 		return
 	}
 	log("Saved %s", path)
+}
+
+func loadLastRecording() {
+	dir := filepath.Join(configDir(), "audio")
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	// Entries are sorted by name (which is timestamp-based), so last = newest
+	var newest string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".wav") {
+			newest = e.Name()
+		}
+	}
+	if newest == "" {
+		return
+	}
+	path := filepath.Join(dir, newest)
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) < 44 {
+		return
+	}
+	// Skip 44-byte WAV header, decode int16 samples
+	raw := data[44:]
+	samples := make([]int16, len(raw)/2)
+	for i := range samples {
+		samples[i] = int16(raw[i*2]) | int16(raw[i*2+1])<<8
+	}
+	state.lastSamples = samples
+	log("Loaded last recording for retry: %s (%d samples, %.1fs)", newest, len(samples), float64(len(samples))/sampleRate)
 }
 
 func normalizeAudio(samples []int16) []int16 {
