@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.0.3
+- Fix: remove 5s global timeout on shared HTTP client that was overriding the 30s per-request timeout (every transcription was dying at 5s while server processed at 5.3s)
+
 ## v3.0.2
 - CRITICAL FIX: Save audio BEFORE transcription again (reverts v2.11.1 mistake that lost audio on failed transcriptions)
 

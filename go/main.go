@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "3.0.2"
+	version = "3.0.3"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -549,7 +549,7 @@ const (
 // Shared HTTP client for speech server - keeps TCP connections alive between
 // healthCheck() warmup and transcribe() POST so we don't re-establish TCP each time.
 var sttClient = &http.Client{
-	Timeout: 5 * time.Second,
+	// No global timeout - per-request context.WithTimeout controls each call
 	Transport: &http.Transport{
 		MaxIdleConns:        2,
 		IdleConnTimeout:     120 * time.Second,
