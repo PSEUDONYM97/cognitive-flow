@@ -131,7 +131,7 @@ var (
 	pReleaseDC           = user32.NewProc("ReleaseDC")
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	pPostMessage         = user32.NewProc("PostMessageW")
-	pSendMessage         = user32.NewProc("SendMessageW")
+
 	pCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
 	pAppendMenu          = user32.NewProc("AppendMenuW")
 	pTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -197,9 +197,6 @@ const (
 	vkLShift   = 0xA0
 	vkRShift   = 0xA1
 	vkReturn   = 0x0D
-	vkControl  = 0x11
-	vkV        = 0x56
-
 	wsPopup        = 0x80000000
 	wsExLayered    = 0x00080000
 	wsExTopmost    = 0x00000008
@@ -207,7 +204,6 @@ const (
 	wsExNoActivate = 0x08000000
 	wsExTransparent = 0x00000020
 
-	lwaColorKey = 0x01
 	lwaAlpha    = 0x02
 
 	inputKeyboard     = 1
@@ -534,16 +530,8 @@ func keyDown(vk uintptr) bool {
 
 // ----- Media control -----
 // Pauses media during recording so mic doesn't pick up playback, and resumes after.
-// Uses DIRECTIONAL WM_APPCOMMAND (APPCOMMAND_MEDIA_PAUSE=47 / APPCOMMAND_MEDIA_PLAY=46)
-// sent to the foreground window. DefWindowProc routes unhandled commands to the shell,
-// which forwards to the active SMTC media session handler (Chrome, Spotify, etc.).
-// Only resumes if audio was confirmed playing when we paused.
-
-const (
-	wmAppCommand     = 0x0319
-	appCmdMediaPlay  = 46 // directional: only plays, never pauses
-	appCmdMediaPause = 47 // directional: only pauses, never plays
-)
+// Uses SendInput with VK_MEDIA_PLAY_PAUSE which goes through keyboard -> shell -> SMTC
+// routing. Verifies correct app was targeted via WASAPI peak meter.
 
 // Shared HTTP client for speech server - keeps TCP connections alive between
 // healthCheck() warmup and transcribe() POST so we don't re-establish TCP each time.
@@ -570,18 +558,6 @@ var (
 	iidIMMDevEnum = [16]byte{0xD2, 0x64, 0x56, 0xA9, 0x14, 0x96, 0x35, 0x4F, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}
 	iidAudioMeter  = [16]byte{0xF6, 0x16, 0x22, 0xC0, 0x67, 0x8C, 0x5B, 0x4B, 0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64}
 )
-
-// sendAppCommand sends a directional media command via WM_APPCOMMAND to the foreground window.
-// DefWindowProc routes unhandled commands up the parent chain to the shell's SMTC router.
-func sendAppCommand(cmd int) {
-	fg, _, _ := pGetForegroundWindow.Call()
-	if fg == 0 {
-		log("sendAppCommand(%d): no foreground window", cmd)
-		return
-	}
-	// wParam = originating window, lParam = (cmd << 16) | FAPPCOMMAND_KEY(0)
-	pSendMessage.Call(fg, wmAppCommand, fg, uintptr(cmd<<16))
-}
 
 // isAudioPlaying checks if any audio is being output via the default render device.
 // Uses IAudioMeterInformation::GetPeakValue. Logs each COM step for debugging.
