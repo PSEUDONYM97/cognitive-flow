@@ -183,7 +183,6 @@ const (
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
 	wmPaint      = 0x000F
-	wmDestroy    = 0x0002
 	wmTimer      = 0x0113
 	wmCommand    = 0x0111
 	wmApp        = 0x8000
@@ -191,9 +190,6 @@ const (
 	wmSetPhase   = wmApp + 2 // custom: wp=phase, triggers UI update on main thread
 	wmRButtonUp  = 0x0205
 	wmLButtonUp  = 0x0202
-	wmNcHitTest  = 0x0084
-	htCaption    = 2
-
 	vkTilde    = 0xC0
 	vkEscape   = 0x1B
 	vkLCtrl    = 0xA2
