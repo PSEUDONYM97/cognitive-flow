@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.0.5
+- Poll media pause verification 4x at 200ms intervals (was single check at 300ms) - fixes PiP/browser slow audio pipeline teardown
+
 ## v3.0.4
 - Retry Last Recording survives restarts: loads most recent WAV from disk on startup
 

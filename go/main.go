@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "3.0.4"
+	version = "3.0.5"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -636,11 +636,17 @@ func pauseMedia() {
 		return
 	}
 	sendKey(0xB3, keyeventfExtended) // VK_MEDIA_PLAY_PAUSE
-	// Verify we actually paused something - SMTC might have toggled the wrong app
-	time.Sleep(300 * time.Millisecond)
-	if isAudioPlaying() {
-		// Audio still playing: we toggled the wrong app (e.g. started music instead of
-		// pausing YouTube). Undo by sending the key again.
+	// Verify we actually paused something - SMTC might have toggled the wrong app.
+	// Poll a few times: PiP/browser audio pipelines can take 500ms+ to fully stop.
+	paused := false
+	for i := 0; i < 4; i++ {
+		time.Sleep(200 * time.Millisecond)
+		if !isAudioPlaying() {
+			paused = true
+			break
+		}
+	}
+	if !paused {
 		log("Media still playing after toggle - wrong app targeted, undoing")
 		sendKey(0xB3, keyeventfExtended)
 		return
@@ -2544,11 +2550,10 @@ var ind struct {
 	dragX   int16  // mouse-down position for click vs drag
 	dragY   int16
 	dragging  bool
-	collapsed bool      // true after 3s idle - subtle dot, no glow
+	collapsed bool      // legacy, always false (collapse removed in v2.9.4)
 	hovered   bool      // mouse is over the indicator
 	tracking  bool      // TrackMouseEvent registered
-	collapseAt time.Time // when to collapse (zero = don't)
-	fadeLevel  float64   // 0.0 = collapsed, 1.0 = expanded (smooth transition)
+	fadeLevel  float64   // always 1.0 (collapse removed in v2.9.4)
 }
 
 type indColor struct{ r, g, b float64 }
