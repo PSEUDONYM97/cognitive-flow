@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1775843934708,
+  "lastScanned": 1776785927427,
   "projectRoot": "/srv/share/projects/ai-transcription",
   "techStack": {
     "languages": [
@@ -54,7 +54,7 @@
       "path": "C:\\Users\\jwill\\.claude\\plugins\\marketplaces\\claude-plugins-official",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1775843934698,
+      "lastAccessed": 1776785927416,
       "keyFiles": [
         "README.md"
       ]
@@ -63,7 +63,7 @@
       "path": "cognitive_flow",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1775843934702,
+      "lastAccessed": 1776785927419,
       "keyFiles": [
         "__init__.py",
         "__main__.py",
@@ -76,7 +76,7 @@
       "path": "cognitive_flow.egg-info",
       "purpose": null,
       "fileCount": 6,
-      "lastAccessed": 1775843934702,
+      "lastAccessed": 1776785927422,
       "keyFiles": [
         "PKG-INFO",
         "SOURCES.txt",
@@ -89,7 +89,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 2,
-      "lastAccessed": 1775843934704,
+      "lastAccessed": 1776785927424,
       "keyFiles": [
         "COGNITIVE_FLOW_APP_DESCRIPTION.md",
         "overlay_ui_research_2026-03-09.md"
@@ -99,7 +99,7 @@
       "path": "go",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1775843934705,
+      "lastAccessed": 1776785927424,
       "keyFiles": [
         "CHANGELOG.md",
         "cogflow.exe",
@@ -112,15 +112,15 @@
       "path": "stt-server",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1775843934706,
+      "lastAccessed": 1776785927424,
       "keyFiles": []
     }
   },
   "hotPaths": [
     {
       "path": "go/main.go",
-      "accessCount": 39,
-      "lastAccessed": 1775015550280,
+      "accessCount": 62,
+      "lastAccessed": 1776791967443,
       "type": "file"
     },
     {

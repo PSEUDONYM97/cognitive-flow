@@ -178,7 +178,7 @@ var (
 // ----- Constants -----
 
 const (
-	version = "3.0.5"
+	version = "3.0.6"
 
 	whKeyboardLL = 13
 	wmKeydown    = 0x0100
@@ -365,7 +365,6 @@ var state struct {
 	cancelled      bool     // set by cancel() to abort pipeline
 
 	hook     uintptr
-	bar      uintptr // screen-edge recording bar
 	dot      uintptr // clickable indicator dot
 	trayHwnd uintptr
 	trayNID  notifyicon
@@ -431,7 +430,6 @@ func main() {
 	applyPendingUpdate()
 
 	// Create UI
-	createBar()
 	createIndicator()
 	createTray()
 
@@ -2411,118 +2409,6 @@ func copyToClipboard(text string) {
 	pSetClipboardData.Call(cfUnicode, hMem)
 }
 
-// ----- Screen-edge recording bar -----
-// Full-width bar at top of screen. Red while recording, amber while processing.
-// Click-through (WS_EX_TRANSPARENT), always on top, invisible when idle.
-
-const (
-	barHeight    = 6
-	timerRepaint = 2
-)
-
-var barProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
-	switch uint32(umsg) {
-	case wmPaint:
-		var ps paintstruct
-		hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-		sw, _, _ := pGetSystemMetrics.Call(0) // SM_CXSCREEN
-
-		p := currentPhase()
-		var color uintptr
-
-		switch p {
-		case phaseRecording:
-			// VU meter: bar width scales with audio level, centered on screen
-			level := audioLevel.Load()
-			if level < 3 {
-				level = 3 // minimum visible sliver so you know it's recording
-			}
-			w := int32(sw) * level / 100
-			x := (int32(sw) - w) / 2
-			// Brighter when louder
-			t := float64(level) / 100.0
-			cr := byte(17 + t*17)    // 0x11 -> 0x22
-			cg := byte(147 + t*64)   // 0x93 -> 0xD3
-			cb := byte(187 + t*51)   // 0xBB -> 0xEE
-			color = uintptr(cb)<<16 | uintptr(cg)<<8 | uintptr(cr) // BGR
-			brush, _, _ := pCreateSolidBrush.Call(color)
-			r := [4]int32{x, 0, x + w, barHeight}
-			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
-			pDeleteObject.Call(brush)
-		case phaseCaptured:
-			// Brief green flash across full bar
-			color = 0x005EC522 // Green (#22C55E in BGR)
-			brush, _, _ := pCreateSolidBrush.Call(color)
-			r := [4]int32{0, 0, int32(sw), barHeight}
-			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
-			pDeleteObject.Call(brush)
-		case phaseProcessing:
-			color = 0x0008B3EA // Amber (#EAB308)
-			brush, _, _ := pCreateSolidBrush.Call(color)
-			r := [4]int32{0, 0, int32(sw), barHeight}
-			pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), brush)
-			pDeleteObject.Call(brush)
-		}
-
-		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-		return 0
-
-	case wmTimer:
-		if wp == timerRepaint {
-			pInvalidateRect.Call(hwnd, 0, 1)
-			return 0
-		}
-		if wp == timerHeartbeat {
-			now := time.Now()
-			wakeGap := now.Sub(state.lastWake) > 60*time.Second
-			if wakeGap {
-				log("Wake detected, pinging server")
-				go healthCheck()
-			}
-			state.lastWake = now
-
-			// Self-heal indicator: recover from sleep/compositor hiding
-			recoverIndicator(wakeGap)
-		}
-		return 0
-
-	case wmSetPhase:
-		applyPhase(int32(wp))
-		return 0
-	}
-
-	r, _, _ := pDefWindowProc.Call(hwnd, umsg, wp, lp)
-	return r
-})
-
-var pKillTimer = user32.NewProc("KillTimer")
-
-func createBar() {
-	cls := utf16p("CogFlowBar")
-	cursor, _, _ := pLoadCursor.Call(0, 32512) // IDC_ARROW
-	wc := wndclass{
-		Size: uint32(unsafe.Sizeof(wndclass{})), WndProc: barProc,
-		ClassName: cls, Cursor: cursor,
-	}
-	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
-
-	sw, _, _ := pGetSystemMetrics.Call(0)
-	hwnd, _, _ := pCreateWindowEx.Call(
-		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
-		uintptr(unsafe.Pointer(cls)), 0,
-		wsPopup, 0, 0, sw, barHeight, 0, 0, 0, 0,
-	)
-	state.bar = hwnd
-
-	pSetLayeredWindowAttr.Call(hwnd, 0, 220, lwaAlpha)
-
-	// Start hidden
-	pShowWindow.Call(hwnd, 0) // SW_HIDE
-
-	// Heartbeat timer for sleep/wake detection
-	pSetTimer.Call(hwnd, timerHeartbeat, 30000, 0)
-}
-
 // ----- Per-pixel alpha indicator -----
 // Software-rendered overlay indicator with 4 visual states:
 //   Idle collapsed:  16px cyan dot at 40% opacity
@@ -2663,6 +2549,22 @@ var indProc = syscall.NewCallback(func(hwnd, umsg, wp, lp uintptr) uintptr {
 
 			renderIndicator()
 		}
+		if wp == timerHeartbeat {
+			now := time.Now()
+			wakeGap := now.Sub(state.lastWake) > 60*time.Second
+			if wakeGap {
+				log("Wake detected, pinging server")
+				go healthCheck()
+			}
+			state.lastWake = now
+
+			// Self-heal indicator: recover from sleep/compositor hiding
+			recoverIndicator(wakeGap)
+		}
+		return 0
+
+	case wmSetPhase:
+		applyPhase(int32(wp))
 		return 0
 
 	case 0x007E: // WM_DISPLAYCHANGE - display resolution/depth changed (sleep/wake, dock, etc.)

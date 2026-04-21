@@ -1,0 +1,7 @@
+{
+  "tool_name": "mcp__plugin_context-mode_context-mode__ctx_execute",
+  "tool_input_preview": "{\"language\":\"shell\",\"code\":\"ssh devbox 'powershell -Command \\\"Get-Content $env:APPDATA\\\\CognitiveFlow\\\\cogflow.log | Select-String -Pattern \\\\\\\"undoing|wrong app|Retry [0-9]|failed:|panic|Silent|Empty...",
+  "error": "Exit code: 255\n\nstdout:\n\n\nstderr:\n'wrong' is not recognized as an internal or external command,\r\noperable program or batch file.",
+  "timestamp": "2026-04-21T16:05:20.718Z",
+  "retry_count": 1
+}
