@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.0.6
+- Remove top-of-screen VU meter bar (never read as clear feedback, bottom-right indicator handles all 6 phases)
+- Heartbeat + sleep/wake detection moved onto the indicator window
+- Fix stale "not saving audio" log message (audio IS saved before transcription now)
+
 ## v3.0.5
 - Poll media pause verification 4x at 200ms intervals (was single check at 300ms) - fixes PiP/browser slow audio pipeline teardown
 

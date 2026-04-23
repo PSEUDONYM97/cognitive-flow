@@ -1908,7 +1908,7 @@ func transcribe(samples []int16, clipboard bool) {
 
 	raw := strings.TrimSpace(result.Text)
 	if raw == "" {
-		log("Empty transcription, not saving audio")
+		log("Empty transcription")
 		setPhase(phaseIdle)
 		return
 	}
@@ -2630,6 +2630,9 @@ func createIndicator() {
 
 	// Slow heartbeat timer when idle (redraws on state changes via applyPhase)
 	pSetTimer.Call(hwnd, timerIndAnim, 1000, 0)
+
+	// Sleep/wake detection + DWM compositor self-heal (every 30s)
+	pSetTimer.Call(hwnd, timerHeartbeat, 30000, 0)
 }
 
 // rebuildIndicatorGDI recreates the memory DC and DIB from a fresh screen DC.
@@ -3187,14 +3190,14 @@ func smoothstep(edge0, edge1, x float64) float64 {
 
 func setPhase(p int32) {
 	setPhaseVal(p)
-	// Post to bar window so UI update happens on main thread.
+	// Post to indicator window so UI update happens on main thread.
 	// Calling ShowWindow/SetTimer from goroutines deadlocks the message pump.
-	if state.bar != 0 {
-		pPostMessage.Call(state.bar, wmSetPhase, uintptr(p), 0)
+	if ind.hwnd != 0 {
+		pPostMessage.Call(ind.hwnd, wmSetPhase, uintptr(p), 0)
 	}
 }
 
-// applyPhase runs on the main thread via the bar's wndproc.
+// applyPhase runs on the main thread via the indicator's wndproc.
 func applyPhase(p int32) {
 	switch p {
 	case phaseRecording:
@@ -3202,51 +3205,32 @@ func applyPhase(p int32) {
 		ind.frame = 0
 		ind.collapsed = false
 		ind.fadeLevel = 1.0
-		pShowWindow.Call(state.bar, 8) // SW_SHOWNA
-		pInvalidateRect.Call(state.bar, 0, 1)
-		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
-		pSetTimer.Call(state.bar, timerRepaint, 200, 0)
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	case phaseCaptured:
-		// Brief "got it" flash - keep bar visible, fast indicator animation
-		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.fadeLevel = 1.0
 		ind.frame = 0
-		pShowWindow.Call(state.bar, 8)
-		pInvalidateRect.Call(state.bar, 0, 1)
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	case phaseProcessing:
-		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.collapsed = false
 		ind.fadeLevel = 1.0
-		pShowWindow.Call(state.bar, 8)
-		pInvalidateRect.Call(state.bar, 0, 1)
-		pSetWindowPos.Call(state.bar, ^uintptr(0), 0, 0, 0, 0, 0x0001|0x0002|0x0010)
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	case phaseSuccess:
-		// Brief "delivered" flash
-		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.fadeLevel = 1.0
 		ind.frame = 0
-		pShowWindow.Call(state.bar, 0) // SW_HIDE
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	case phaseFailed:
 		// Stay visible - clickable retry
-		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.fadeLevel = 1.0
 		ind.frame = 0
-		pShowWindow.Call(state.bar, 0) // SW_HIDE
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 66, 0)
 	default: // phaseIdle
-		pKillTimer.Call(state.bar, timerRepaint)
 		audioLevel.Store(0)
 		ind.collapsed = false
 		ind.fadeLevel = 1.0
-		pShowWindow.Call(state.bar, 0) // SW_HIDE
 		pSetTimer.Call(ind.hwnd, timerIndAnim, 1000, 0)
 	}
 
