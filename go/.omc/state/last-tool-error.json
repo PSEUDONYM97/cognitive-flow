@@ -1,0 +1,7 @@
+{
+  "tool_name": "mcp__plugin_context-mode_context-mode__ctx_execute_file",
+  "tool_input_preview": "{\"path\":\"/srv/share/projects/ai-transcription/go/main.go\",\"language\":\"go\",\"code\":\"\\nimport re\\n\\nwith open('/srv/share/projects/ai-transcription/go/main.go', 'r') as f:\\n    content = f.read()\\n    li...",
+  "error": "Exit code: 2\n\nstdout:\n\n\nstderr:\n# command-line-arguments\n./script.go:17:1: syntax error: unexpected import, expecting }\n./script.go:19:11: more than one character in rune literal\n./script.go:23:1: invalid character U+0023 '#'\n./script.go:26:30: unknown escape\n./script.go:31:1: invalid character U+0023 '#'\n./script.go:35:21: unknown escape\n./script.go:41:33: unknown escape\n./script.go:45:30: unknown escape\n./script.go:49:1: invalid character U+0023 '#'\n./script.go:49:46: syntax error: unexpected ...",
+  "timestamp": "2026-04-12T22:29:41.517Z",
+  "retry_count": 1
+}
